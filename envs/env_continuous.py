@@ -1,85 +1,47 @@
-import gym
-from gym import spaces
+# file: envs/continuous_action_env.py
+from __future__ import annotations
 import numpy as np
+from gym import spaces
 from envs.env_core import EnvCore
 
 
 class ContinuousActionEnv(object):
     """
-    对于连续动作环境的封装
-    Wrapper for continuous action environment.
+    直接使用改造后的 EnvCore（已对接 MultiUAVSphereEnv）
     """
 
     def __init__(self):
-        self.env = EnvCore()
+        self.env = EnvCore()  # 需要改参时，直接传到 EnvCore(...) 里即可
         self.num_agent = self.env.agent_num
 
         self.signal_obs_dim = self.env.obs_dim
         self.signal_action_dim = self.env.action_dim
 
-        # if true, action is a number 0...N, otherwise action is a one-hot N-dimensional vector
         self.discrete_action_input = False
-
         self.movable = True
 
-        # configure spaces
-        self.action_space = []
-        self.observation_space = []
-        self.share_observation_space = []
-
-        share_obs_dim = 0
-        total_action_space = []
-        for agent in range(self.num_agent):
-            # physical action space
-            u_action_space = spaces.Box(
-                low=-np.inf,
-                high=+np.inf,
-                shape=(self.signal_action_dim,),
-                dtype=np.float32,
-            )
-
-            if self.movable:
-                total_action_space.append(u_action_space)
-
-            # total action space
-            self.action_space.append(total_action_space[0])
-
-            # observation space
-            share_obs_dim += self.signal_obs_dim
-            self.observation_space.append(
-                spaces.Box(
-                    low=-np.inf,
-                    high=+np.inf,
-                    shape=(self.signal_obs_dim,),
-                    dtype=np.float32,
-                )
-            )  # [-inf,inf]
-
-        self.share_observation_space = [
-            spaces.Box(
-                low=-np.inf, high=+np.inf, shape=(share_obs_dim,), dtype=np.float32
-            )
-            for _ in range(self.num_agent)
-        ]
+        # —— 与官方轻量版一致，直接复用 EnvCore 的 spaces —— #
+        self.action_space = self.env.action_space
+        self.observation_space = self.env.observation_space
+        self.share_observation_space = self.env.share_observation_space
 
     def step(self, actions):
         """
-        输入actions维度假设：
-        # actions shape = (5, 2, 5)
-        # 5个线程的环境，里面有2个智能体，每个智能体的动作是一个one_hot的5维编码
-
-        Input actions dimension assumption:
-        # actions shape = (5, 2, 5)
-        # 5 threads of environment, there are 2 agents inside, and each agent's action is a 5-dimensional one_hot encoding
+        单环境情形：actions 形状通常为 (num_agent, action_dim)
+        外层若做并行（num_threads），请用 VecEnv 管理，不在此类里处理“线程维”
         """
-
-        results = self.env.step(actions)
-        obs, rews, dones, infos = results
-        return np.stack(obs), np.stack(rews), np.stack(dones), infos
+        obs_list, rews_list, dones_list, infos_list = self.env.step(actions)
+        # 官方轻量版期望返回 np.stack 后的数组
+        return (
+            np.stack(obs_list),           # -> (N, obs_dim)
+            np.stack(rews_list),          # -> (N, 1)
+            np.stack(dones_list),         # -> (N,)
+            infos_list,                   # list(dict)
+        )
 
     def reset(self):
-        obs = self.env.reset()
-        return np.stack(obs)
+        obs_list = self.env.reset()
+        return np.stack(obs_list)         # -> (N, obs_dim)
 
     def close(self):
         pass

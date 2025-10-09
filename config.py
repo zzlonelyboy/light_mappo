@@ -226,7 +226,7 @@ def get_config():
     )
 
     # replay buffer parameters
-    parser.add_argument("--episode_length", type=int, default=200, help="Max length for any episode")
+    parser.add_argument("--episode_length", type=int, default=400, help="Max length for any episode")
 
     # network parameters
     parser.add_argument(
@@ -358,7 +358,7 @@ def get_config():
     parser.add_argument(
         "--value_loss_coef",
         type=float,
-        default=1,
+        default=0.5,
         help="value loss coefficient (default: 0.5)",
     )
     parser.add_argument(
@@ -370,7 +370,7 @@ def get_config():
     parser.add_argument(
         "--max_grad_norm",
         type=float,
-        default=10.0,
+        default=0.5,
         help="max norm of gradients (default: 0.5)",
     )
     parser.add_argument(

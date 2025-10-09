@@ -1,5 +1,7 @@
 import time
 import os
+
+import imageio
 import numpy as np
 from itertools import chain
 import torch
@@ -23,6 +25,9 @@ class EnvRunner(Runner):
         episodes = int(self.num_env_steps) // self.episode_length // self.n_rollout_threads
 
         for episode in range(episodes):
+            success=0
+            col=0
+            timeout=0
             if self.use_linear_lr_decay:
                 for agent_id in range(self.num_agents):
                     self.trainer[agent_id].policy.lr_decay(episode, episodes)
@@ -40,7 +45,14 @@ class EnvRunner(Runner):
 
                 # Obser reward and next obs
                 obs, rewards, dones, infos = self.envs.step(actions_env)
-
+                for i,done_list in enumerate(dones):
+                        if done_list[0]:
+                            if infos[i][0]["term_reason"] == "success":
+                                success += 1
+                            elif infos[i][0]["term_reason"] == "collision":
+                                col += 1
+                            elif infos[i][0]["term_reason"] == "timeout":
+                                timeout += 1
                 data = (
                     obs,
                     rewards,
@@ -83,21 +95,29 @@ class EnvRunner(Runner):
                     )
                 )
 
-                if self.env_name == "MPE":
+                if self.env_name == "MPE" or self.env_name == "MyEnv":
+                    train_infos[0].update({
+                        # "success": success,
+                        # "collision": col,
+                        # "timeout": timeout,
+                        "success_rate": success*1.0 / max(1,(success+col+timeout)),
+                        "collision_rate": col*1.0 / max(1,(success+col+timeout)),
+                        "timeout_rate": timeout*1.0 / max(1,(success+col+timeout)),
+                    })
                     for agent_id in range(self.num_agents):
-                        idv_rews = []
-                        for info in infos:
-                            if "individual_reward" in info[agent_id].keys():
-                                idv_rews.append(info[agent_id]["individual_reward"])
-                        train_infos[agent_id].update({"individual_rewards": np.mean(idv_rews)})
+                    #     idv_rews = []
+                    #     for info in infos:
+                    #         if "individual_reward" in info[agent_id].keys():
+                    #             idv_rews.append(info[agent_id]["individual_reward"])
+                    #     train_infos[agent_id].update({"individual_rewards": np.mean(idv_rews)})
                         train_infos[agent_id].update(
                             {
                                 "average_episode_rewards": np.mean(self.buffer[agent_id].rewards)
                                 * self.episode_length
                             }
                         )
-                self.log_train(train_infos, total_num_steps)
-
+                # self.log_train(train_infos, total_num_steps)
+                self.log_train(train_infos,episode)
             # eval
             if episode % self.eval_interval == 0 and self.use_eval:
                 self.eval(total_num_steps)
