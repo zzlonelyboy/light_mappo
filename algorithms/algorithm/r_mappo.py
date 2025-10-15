@@ -49,6 +49,11 @@ class RMAPPO():
         self._use_value_active_masks = args.use_value_active_masks
         self._use_policy_active_masks = args.use_policy_active_masks
 
+        self._entropy_coef_init = float(self.entropy_coef)
+        self._entropy_coef_final = 0.0      # 退火到 0
+        self._entropy_anneal_steps = 100000 # 退火总“更新次数”（按 train() 次数计）
+        self._entropy_anneal_count = 0      # 已完成的更新计数
+
         assert (self._use_popart and self._use_valuenorm) == False, (
             "self._use_popart and self._use_valuenorm can not be set True simultaneously")
 
@@ -97,6 +102,15 @@ class RMAPPO():
             value_loss = value_loss.mean()
 
         return value_loss
+    
+    def _anneal_entropy_coef(self):
+        """线性退火 entropy_coef，从 init -> final。每调用一次视为推进 1 步。"""
+        T = self._entropy_anneal_steps
+        if T <= 0:
+            return
+        self._entropy_anneal_count += 1
+        p = min(1.0, self._entropy_anneal_count / float(T))  # 进度 [0,1]
+        self.entropy_coef = self._entropy_coef_init * (1.0 - p) + self._entropy_coef_final * p
 
     def ppo_update(self, sample, update_actor=True):
         """
@@ -224,6 +238,9 @@ class RMAPPO():
         for k in train_info.keys():
             train_info[k] /= num_updates
 
+        #退火
+        self._anneal_entropy_coef()
+        # train_info['entropy_coef'] = float(self.entropy_coef)
         return train_info
 
     def prep_training(self):

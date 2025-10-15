@@ -188,7 +188,7 @@ def get_config():
     parser.add_argument(
         "--n_rollout_threads",
         type=int,
-        default=5,
+        default=10,
         help="Number of parallel envs for training rollouts",
     )
     parser.add_argument(
@@ -206,7 +206,7 @@ def get_config():
     parser.add_argument(
         "--num_env_steps",
         type=int,
-        default=10e6,
+        default=20e6,
         help="Number of environment steps to train (default: 10e6)",
     )
     parser.add_argument(
@@ -256,16 +256,21 @@ def get_config():
     parser.add_argument(
         "--hidden_size",
         type=int,
-        default=64,
+        # default=64,修
+        default=128,
         help="Dimension of hidden layers for actor/critic networks",
     )
     parser.add_argument(
         "--layer_N",
         type=int,
-        default=1,
+        # default=1,修
+        default=2,
         help="Number of layers for actor/critic networks",
     )
-    parser.add_argument("--use_ReLU", action="store_false", default=True, help="Whether to use ReLU")
+    parser.add_argument("--use_ReLU", action="store_false", 
+                        # default=True 修
+                        default=False, 
+                        help="Whether to use ReLU")
     parser.add_argument(
         "--use_popart",
         action="store_true",
@@ -314,11 +319,11 @@ def get_config():
     )
 
     # optimizer parameters
-    parser.add_argument("--lr", type=float, default=5e-4, help="learning rate (default: 5e-4)")
+    parser.add_argument("--lr", type=float, default=1e-4, help="learning rate (default: 5e-4)")
     parser.add_argument(
         "--critic_lr",
         type=float,
-        default=5e-4,
+        default=3e-4,
         help="critic learning rate (default: 5e-4)",
     )
     parser.add_argument(
@@ -421,7 +426,7 @@ def get_config():
     parser.add_argument(
         "--use_linear_lr_decay",
         action="store_true",
-        default=False,
+        default=True,
         help="use a linear schedule on the learning rate",
     )
     # save parameters
