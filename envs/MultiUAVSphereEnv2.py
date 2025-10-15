@@ -102,10 +102,10 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
         seed: Optional[int] = None,
 
         # ---- 障碍物相关（新增） ----
-        num_obstacles: int = 3,     # 障碍物数量（0 表示无障碍）
-        obs_k: int = 1,             # 观测中纳入最近障碍个数（每个障碍拼 4 维：方向(3)+净空(1)）；0 表示不加入
-        d_safe_obs: float = 2.0,    # 与障碍表面的安全净空（软惩罚阈）
-        w_obs: float = 0.6,         # 障碍净空惩罚权重
+        num_obstacles: int = 4,     # 障碍物数量（0 表示无障碍）
+        obs_k: int = 2,             # 观测中纳入最近障碍个数（每个障碍拼 4 维：方向(3)+净空(1)）；0 表示不加入
+        d_safe_obs: float = 4.0,    # 与障碍表面的安全净空（软惩罚阈）
+        w_obs: float = 1,         # 障碍净空惩罚权重
         # 障碍生成参数（随机生成时使用）
         obstacle_halfsize_range: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]] = ((3, 8), (3, 8), (3, 8)),  # 每轴半尺寸范围
         obstacle_path_span: Tuple[float, float] = (0.3, 0.8),  # 沿（起点->目标）的参数 t 取值范围
@@ -118,12 +118,16 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
         w_sep: float = 1,
         w_smooth: float = 0.05,
         k_align_weight: float = 0.5,  # 若 align_reward=False 则置 0
-        R_succ: float = 100.0,
+        R_succ: float = 400.0,
+        alive_penalty_per_step: float = 1.0,   # 每步小额负奖励（按人均分）
+        no_progress_window: int = 20,          # 无进展窗口（步）
+        no_progress_eps: float = 0.5,          # dc 改善阈值（米）
+        no_prog_penalty: float = 4.0,          # 触发时每步额外惩罚（按人均分）
         # 机-机“剐蹭”惩罚（不终止）
-        R_scrape_ind: float = 40.0,       # 参与者个体惩罚
+        R_scrape_ind: float = 60.0,       # 参与者个体惩罚
         R_scrape_shared: float = 0.0,     # 小额团队连带（可 0）
         # 障碍物碰撞（终止）惩罚
-        R_obs_coll_ind: float = 200.0,    # 进入盒体的个体惩罚
+        R_obs_coll_ind: float = 300.0,    # 进入盒体的个体惩罚
         R_obs_coll_shared: float = 0.0,   # 团队连带（可 0）
         R_tout: float = 20.0              # 可选超时惩罚（默认未启用）
     ) -> None:
@@ -153,6 +157,12 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
         self.k_align = float(k_align_weight if align_reward else 0.0)
         self.R_succ = float(R_succ)
         self.R_tout = float(R_tout)
+        
+
+        self.alive_penalty_per_step = float(alive_penalty_per_step) ## 每步小额负奖励（按人均分）
+        self.no_progress_window = int(no_progress_window)
+        self.no_progress_eps = float(no_progress_eps)
+        self.no_prog_penalty = float(no_prog_penalty)
 
         # 剐蹭与障碍碰撞罚
         self.R_scrape_ind = float(R_scrape_ind)
@@ -237,9 +247,9 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
 
         # 目标槽位方向（对齐目标方向）
         U0 = fibonacci_dirs(self.N)
-        Rn = rotate_to((self.g - self.c) / (np.linalg.norm(self.g - self.c) + 1e-9))
-        self.U = (Rn @ U0.T).T.astype(np.float32)
-
+        # Rn = rotate_to((self.g - self.c) / (np.linalg.norm(self.g - self.c) + 1e-9))
+        # self.U = (Rn @ U0.T).T.astype(np.float32)
+        self.U=U0.astype(np.float32)
         # 初始位置：放在球面槽位（你当前版本不加 jitter）
         self.p = (self.c[None, :] + self.R * self.U).astype(np.float32)
 
@@ -267,6 +277,7 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
         # 缓存距离
         self._update_center()
         self._prev_dc = np.linalg.norm(self.c - self.g)
+        self._dc_window = [self._prev_dc]
 
         obs, info = self._get_obs(), self._get_info()
         return obs, info
@@ -300,9 +311,19 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
         terminated, term_reason = self._check_terminated()
         truncated = self.t >= self.T_max
 
+        if self.alive_penalty_per_step != 0.0:
+            rew -= (self.alive_penalty_per_step / self.N)
+        self._dc_window.append(np.linalg.norm(self.c - self.g))
+        if len(self._dc_window) > max(2, self.no_progress_window):
+            self._dc_window.pop(0)
+            if self.no_prog_penalty != 0.0:
+                dc_improve = self._dc_window[0] - self._dc_window[-1]
+                if dc_improve < self.no_progress_eps:
+                    rew -= (self.no_prog_penalty / self.N)
         # 可选超时惩罚（如需启用，可在终止步时生效）
         if truncated and not terminated and self.R_tout > 0:
             rew -= (self.R_tout / self.N)
+        
 
         info = self._get_info()
         if terminated or truncated:
@@ -362,38 +383,43 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
         obs_agent = np.concatenate([pc_rel, e_i_norm, to_goal, h_now, dh_flat, nbr_feats], axis=1)
 
         # 障碍物最近 obs_k 个特征（可选）
-        if self.obs_k > 0 and len(self.obstacles) > 0:
-            sd_all_list = []
-            dir_all_list = []
-            for (oc, oh) in self.obstacles:
-                cp = aabb_closest_point(P, oc, oh)        # (N,3)
-                dvec = cp - P                              # (N,3)
-                dist = np.linalg.norm(dvec, axis=1)        # (N,)
-                dir_unit = np.divide(dvec, dist[:, None] + 1e-9)
-                sd = aabb_signed_distance(P, oc, oh)       # (N,)
-                sd_all_list.append(sd)
-                dir_all_list.append(dir_unit)
+        if self.obs_k > 0:
+            if len(self.obstacles) > 0:
+                sd_all_list = []
+                dir_all_list = []
+                for (oc, oh) in self.obstacles:
+                    cp = aabb_closest_point(P, oc, oh)        # (N,3)
+                    dvec = cp - P                              # (N,3)
+                    dist = np.linalg.norm(dvec, axis=1)        # (N,)
+                    dir_unit = np.divide(dvec, dist[:, None] + 1e-9)
+                    sd = aabb_signed_distance(P, oc, oh)       # (N,)
+                    sd_all_list.append(sd)
+                    dir_all_list.append(dir_unit)
 
-            sd_all = np.stack(sd_all_list, axis=1)         # (N, Mobs)
-            dir_all = np.stack(dir_all_list, axis=2)       # (N,3,Mobs)
-            idx = np.argsort(sd_all, axis=1)               # (N, Mobs)
+                sd_all = np.stack(sd_all_list, axis=1)         # (N, Mobs)
+                dir_all = np.stack(dir_all_list, axis=2)       # (N,3,Mobs)
+                idx = np.argsort(sd_all, axis=1)               # (N, Mobs)
 
-            feats = []
-            Mobs = sd_all.shape[1]
-            take = min(self.obs_k, Mobs)
-            for i in range(self.N):
-                fi = []
-                for k in range(take):
-                    j = idx[i, k]
-                    dir_ijk = dir_all[i, :, j]             # (3,)
-                    sd_ij = sd_all[i, j]
-                    fi.append(np.concatenate([dir_ijk, [sd_ij / self.R]], axis=0))  # 4
-                while len(fi) < self.obs_k:
-                    fi.append(np.zeros(4, dtype=np.float32))
-                feats.append(np.concatenate(fi, axis=0))   # 4*obs_k
-            feats = np.stack(feats, axis=0)
+                feats = []
+                Mobs = sd_all.shape[1]
+                take = min(self.obs_k, Mobs)
+                for i in range(self.N):
+                    fi = []
+                    for k in range(take):
+                        j = idx[i, k]
+                        dir_ijk = dir_all[i, :, j]             # (3,)
+                        sd_ij = sd_all[i, j]
+                        fi.append(np.concatenate([dir_ijk, [sd_ij / self.R]], axis=0))  # 4
+                    while len(fi) < self.obs_k:
+                        fi.append(np.zeros(4, dtype=np.float32))
+                    feats.append(np.concatenate(fi, axis=0))   # 4*obs_k
+                feats = np.stack(feats, axis=0)
+            else:
+                # 无障碍：直接零填充
+                feats = np.zeros((self.N, 4 * self.obs_k), dtype=np.float32)
+
             obs_agent = np.concatenate([obs_agent, feats], axis=1)
-
+        
         obs = {
             "obs": obs_agent.astype(np.float32),
             "nbr_mask": nbr_mask.astype(np.float32),
@@ -505,13 +531,78 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
 
     # ------------------------- 障碍生成（内部） -------------------------
 
+    # def _generate_random_obstacles(self):
+    #     """根据 num_obstacles 随机生成 AABB，沿路径附近分布。"""
+    #     self.obstacles = []
+    #     if self.num_obstacles <= 0:
+    #         return
+
+    #     # 路径：c(0)→g(1) 的直线
+    #     c0 = self.c.copy()
+    #     g0 = self.g.copy()
+    #     dir_path = g0 - c0
+    #     L = float(np.linalg.norm(dir_path))
+    #     if L < 1e-6:
+    #         dir_unit = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    #     else:
+    #         dir_unit = dir_path / L
+
+    #     # 构造两个与路径正交的基
+    #     tmp = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    #     if abs(np.dot(tmp, dir_unit)) > 0.9:
+    #         tmp = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    #     e1 = np.cross(dir_unit, tmp); e1 /= (np.linalg.norm(e1) + 1e-9)
+    #     e2 = np.cross(dir_unit, e1);  e2 /= (np.linalg.norm(e2) + 1e-9)
+
+    #     tmin, tmax = self.obstacle_path_span
+    #     for _ in range(self.num_obstacles):
+    #         # 沿路径的参数 t（不放太靠近起点/终点）
+    #         t = float(self._rng.uniform(tmin, tmax))
+    #         base = c0 + t * dir_unit * L
+    #         # 横向抖动
+    #         jitter = (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter) * e1 \
+    #                + (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter) * e2
+    #         center = base + jitter
+
+    #         # 半尺寸
+    #         hx = self._rng.uniform(*self.obstacle_halfsize_range[0])
+    #         hy = self._rng.uniform(*self.obstacle_halfsize_range[1])
+    #         hz = self._rng.uniform(*self.obstacle_halfsize_range[2])
+    #         half = np.array([hx, hy, hz], dtype=np.float32)
+
+    #         # 与所有初始机位保持最小净空（避免一开场就卡在障碍里）
+    #         sd0 = aabb_signed_distance(self.p, center, half)  # (N,)
+    #         if (sd0 < self.obstacle_clear_margin).any():
+    #             # 若不满足净空则再抖一次（简单重采样 3 次）
+    #             ok = False
+    #             for _retry in range(3):
+    #                 jitter = (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter) * e1 \
+    #                        + (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter) * e2
+    #                 center = base + jitter
+    #                 sd0 = aabb_signed_distance(self.p, center, half)
+    #                 if not (sd0 < self.obstacle_clear_margin).any():
+    #                     ok = True
+    #                     break
+    #             if not ok:
+    #                 # 放弃这一障碍，继续下一个，确保不会把初始机位困住
+    #                 continue
+
+    #         self.obstacles.append((center.astype(np.float32), half.astype(np.float32)))
     def _generate_random_obstacles(self):
-        """根据 num_obstacles 随机生成 AABB，沿路径附近分布。"""
+        """随机生成 AABB，沿 c→g 附近分布；写死一条可达通路（航线走廊）约束。"""
         self.obstacles = []
-        if self.num_obstacles <= 0:
+        M = int(self.num_obstacles)
+        if M <= 0:
             return
 
-        # 路径：c(0)→g(1) 的直线
+        # 固定常量（写死）
+        PATH_CLEAR_MARGIN = 8.0          # 航线走廊半宽（米）
+        MAX_TRIES_PER_OBS = 10           # 每个障碍的最大放置尝试
+        GLOBAL_MAX_TRIES = max(50, 10*M) # 全局尝试上限
+        SHRINK_FACTOR = 0.85             # 放置失败时缩小盒体
+        SECOND_STAGE_TRIES = 6           # 缩小后再试次数
+
+        # 路径：c(0)→g(1)
         c0 = self.c.copy()
         g0 = self.g.copy()
         dir_path = g0 - c0
@@ -521,7 +612,7 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
         else:
             dir_unit = dir_path / L
 
-        # 构造两个与路径正交的基
+        # 正交基（横向偏移用）
         tmp = np.array([0.0, 0.0, 1.0], dtype=np.float32)
         if abs(np.dot(tmp, dir_unit)) > 0.9:
             tmp = np.array([0.0, 1.0, 0.0], dtype=np.float32)
@@ -529,36 +620,68 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
         e2 = np.cross(dir_unit, e1);  e2 /= (np.linalg.norm(e2) + 1e-9)
 
         tmin, tmax = self.obstacle_path_span
-        for _ in range(self.num_obstacles):
-            # 沿路径的参数 t（不放太靠近起点/终点）
+
+        placed = 0
+        global_tries = 0
+        while placed < M and global_tries < GLOBAL_MAX_TRIES:
+            global_tries += 1
+
+            # 路径上的基准点
             t = float(self._rng.uniform(tmin, tmax))
             base = c0 + t * dir_unit * L
-            # 横向抖动
-            jitter = (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter) * e1 \
-                   + (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter) * e2
-            center = base + jitter
 
-            # 半尺寸
+            # 初始尺寸
             hx = self._rng.uniform(*self.obstacle_halfsize_range[0])
             hy = self._rng.uniform(*self.obstacle_halfsize_range[1])
             hz = self._rng.uniform(*self.obstacle_halfsize_range[2])
             half = np.array([hx, hy, hz], dtype=np.float32)
 
-            # 与所有初始机位保持最小净空（避免一开场就卡在障碍里）
-            sd0 = aabb_signed_distance(self.p, center, half)  # (N,)
-            if (sd0 < self.obstacle_clear_margin).any():
-                # 若不满足净空则再抖一次（简单重采样 3 次）
-                ok = False
-                for _retry in range(3):
-                    jitter = (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter) * e1 \
-                           + (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter) * e2
-                    center = base + jitter
-                    sd0 = aabb_signed_distance(self.p, center, half)
-                    if not (sd0 < self.obstacle_clear_margin).any():
-                        ok = True
-                        break
-                if not ok:
-                    # 放弃这一障碍，继续下一个，确保不会把初始机位困住
+            ok = False
+            # 第一阶段：原尺寸尝试
+            for _ in range(MAX_TRIES_PER_OBS):
+                # 横向抖动
+                jitter = (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter) * e1 \
+                    + (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter) * e2
+                center = base + jitter
+
+                # ① 航线走廊约束：障碍中心到路径距离 >= PATH_CLEAR_MARGIN
+                #    d_line = || (center - c0) × dir_unit ||
+                d_line = np.linalg.norm(np.cross(center - c0, dir_unit))
+                if d_line < PATH_CLEAR_MARGIN:
                     continue
 
+                # ② 初始机位净空（不把无人机一出生就卡住）
+                sd0 = aabb_signed_distance(self.p, center, half)  # (N,)
+                if (sd0 < self.obstacle_clear_margin).any():
+                    continue
+
+                ok = True
+                break
+
+            # 第二阶段：若还不行，缩小尺寸再试几次
+            if not ok:
+                half2 = half * SHRINK_FACTOR
+                for _ in range(SECOND_STAGE_TRIES):
+                    jitter = (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter * 0.7) * e1 \
+                        + (self._rng.uniform(-1.0, 1.0) * self.obstacle_lateral_jitter * 0.7) * e2
+                    center = base + jitter
+
+                    d_line = np.linalg.norm(np.cross(center - c0, dir_unit))
+                    if d_line < PATH_CLEAR_MARGIN:
+                        continue
+
+                    sd0 = aabb_signed_distance(self.p, center, half2)
+                    if (sd0 < self.obstacle_clear_margin).any():
+                        continue
+
+                    half = half2  # 采用缩小后的尺寸
+                    ok = True
+                    break
+
+            if not ok:
+                # 这一次放置失败，换一个候选（继续 while 循环）
+                continue
+
+            # 成功放置
             self.obstacles.append((center.astype(np.float32), half.astype(np.float32)))
+            placed += 1
