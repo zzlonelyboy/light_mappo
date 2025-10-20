@@ -53,6 +53,14 @@ class EnvRunner(Runner):
                                 col += 1
                             elif infos[i][0]["term_reason"] == "timeout":
                                 timeout += 1
+
+                fp=0
+                fn=0
+                for info in infos:
+                    fp+=info[0]['det_tp_fp_fn'][0]
+                    fn+=info[0]['det_tp_fp_fn'][1]+info[0]['det_tp_fp_fn'][2]
+                det_precision=fp*1.0/(fp+fn)
+                det_recall=fn*1.0/(fp+fn)
                 data = (
                     obs,
                     rewards,
@@ -95,7 +103,7 @@ class EnvRunner(Runner):
                     )
                 )
 
-                if self.env_name == "MPE" or self.env_name == "MyEnv":
+                if self.env_name == "MPE" or self.env_name == "MyEnv" :
                     train_infos[0].update({
                         # "success": success,
                         # "collision": col,
@@ -114,6 +122,16 @@ class EnvRunner(Runner):
                             {
                                 "average_episode_rewards": np.mean(self.buffer[agent_id].rewards)
                                 * self.episode_length
+                            }
+                        )
+                if self.env_name=='Stage2Env':
+                    for agent_id in range(self.num_agents):
+                        train_infos[agent_id].update(
+                            {
+                                "average_episode_rewards": np.mean(self.buffer[agent_id].rewards)
+                                                           * self.episode_length,
+                                "det_precision": det_precision,
+                                "det_recall": det_recall,
                             }
                         )
                 # self.log_train(train_infos, total_num_steps)

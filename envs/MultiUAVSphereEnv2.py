@@ -240,6 +240,7 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
 
         # 目标与重心（原点）
         self.c = np.zeros(3, dtype=np.float32)
+        self.true_c = self.c.copy()
         goal_dist = self._rng.uniform(80.0, 120.0)
         dir_xyz = self._rng.randn(3).astype(np.float32)
         dir_xyz /= (np.linalg.norm(dir_xyz) + 1e-9)
@@ -252,7 +253,7 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
         self.U=U0.astype(np.float32)
         # 初始位置：放在球面槽位（你当前版本不加 jitter）
         self.p = (self.c[None, :] + self.R * self.U).astype(np.float32)
-
+        self.true_p = self.p.copy()
         # 生成/保持障碍
         if not self._obstacles_fixed:
             self._generate_random_obstacles()
@@ -302,7 +303,7 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
 
         # 固定速度推进
         self.p = self.p + self.v0 * new_h * self.dt
-
+        self.true_p =self.true_p+self.v0 * new_h * self.dt
         # 重心
         self._update_center()
 
@@ -343,6 +344,8 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
 
     def _update_center(self):
         self.c = self.p.mean(axis=0)
+        self.true_c = self.true_p.mean(axis=0)
+
 
     def _compute_per_agent_obs_dim(self) -> int:
         # (p-c)/R (3) + e_i/R (3) + (g-p)/||·|| (3) + h_i (3) + Δh K (3K)
@@ -433,11 +436,11 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
         self._prev_dc = dc
 
         # ---- per-agent：编队误差 ----
-        e = self.p - (self.c[None, :] + self.R * self.U)
+        e = self.true_p - (self.c[None, :] + self.R * self.U)
         r_form_i = - self.w_form * (np.linalg.norm(e, axis=1) / self.R)
 
         # ---- per-agent：机-机安全（软铰链）----
-        P = self.p
+        P = self.true_p
         dmat = np.linalg.norm(P[:, None, :] - P[None, :, :], axis=-1)
         np.fill_diagonal(dmat, np.inf)
         dmin_i = dmat.min(axis=1)
@@ -496,14 +499,15 @@ class MultiUAVSphereEnvWithObstacle(gym.Env):
 
     def _check_terminated(self):
         # 成功
-        if np.linalg.norm(self.c - self.g) <= self.goal_radius:
+        # if np.linalg.norm(self.c - self.g) <= self.goal_radius:
+        if np.linalg.norm(self.true_c-self.g)<=self.goal_radius:
             # print("success")
             return True, "success"
 
         # 仅障碍物碰撞才终止
         if len(self.obstacles) > 0:
             for (oc, oh) in self.obstacles:
-                sd = aabb_signed_distance(self.p, oc, oh)  # (N,)
+                sd = aabb_signed_distance(self.true_p, oc, oh)  # (N,)
                 if (sd <= 0.0).any():
                     return True, "collision"
         return False, ""

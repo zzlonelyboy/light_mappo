@@ -244,7 +244,7 @@ def add_eval_args(parser):
         "--saved_model_dir",
         type=str,
         required=False,
-        default="/home/zz/project_Uavs_gps_spoofing_detect/light_mappo/results/MyEnv/MyEnv/mappo/check/run8/models",
+        default="D:\\Reproduction_of_the_paper\\light_mappo\\results\\MyEnv\\MyEnv\\mappo\\check\\run2\\models",
         help="包含 actor_agent*.pt / critic_agent*.pt 的目录",
     )
     parser.add_argument("--n_eval_episodes", type=int, default=2000)
@@ -399,23 +399,6 @@ def evaluate(runner, n_eps=2000, deterministic=True, render=False, record_dir=""
         # 团队回报（各 agent 奖励求和）
         r = np.array(rewards)  # [n_envs, n_agents]
         ep_return_acc += float(r.sum())
-
-        # 渲染/录制
-        if render or record_dir:
-            try:
-                frame = envs.render(mode="rgb_array")
-                if record_dir:
-                    # 对向量化返回做兼容
-                    if isinstance(frame, (list, tuple)):
-                        # 形如 [[img]] 的嵌套
-                        try:
-                            frames.append(frame[0][0])
-                        except Exception:
-                            frames.append(frame[0])
-                    else:
-                        frames.append(frame)
-            except Exception:
-                pass
 
         # 处理每个 env 的 done（我们强制 n_envs=1）
         done_flags = _reduce_done_flags(dones)
