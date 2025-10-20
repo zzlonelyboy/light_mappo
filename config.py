@@ -166,7 +166,10 @@ def get_config():
         default="check",
         help="an identifier to distinguish different experiment.",
     )
-    parser.add_argument("--seed", type=int, default=1, help="Random seed for numpy/torch")
+    parser.add_argument("--seed", type=int,
+                        # default=1,
+                        default=1,
+                        help="Random seed for numpy/torch")
     parser.add_argument(
         "--cuda",
         action="store_false",
@@ -206,7 +209,7 @@ def get_config():
     parser.add_argument(
         "--num_env_steps",
         type=int,
-        default=20e6,
+        default=40e6,
         help="Number of environment steps to train (default: 10e6)",
     )
     parser.add_argument(
@@ -217,7 +220,7 @@ def get_config():
     )
 
     # env parameters
-    parser.add_argument("--env_name", type=str, default="MyEnv", help="specify the name of environment")
+    parser.add_argument("--env_name", type=str, default="Stage2Env", help="specify the name of environment")
     parser.add_argument(
         "--use_obs_instead_of_state",
         action="store_true",
@@ -268,8 +271,8 @@ def get_config():
         help="Number of layers for actor/critic networks",
     )
     parser.add_argument("--use_ReLU", action="store_false", 
-                        # default=True 修
-                        default=False, 
+                        # default=True,修
+                        default=False,
                         help="Whether to use ReLU")
     parser.add_argument(
         "--use_popart",

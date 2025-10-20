@@ -1,12 +1,15 @@
 # file: envs/env_core.py
 from __future__ import annotations
-import numpy as np
-from typing import List, Any, Dict
-from gym import spaces
 
+import gym
+import numpy as np
+from typing import List, Any, Dict, Optional, Callable
+from gym import spaces
+from envs.stage2DetectEnv import Stage2DetectEnv
 # 改成你实际的导入路径
 from envs.MultiUAVSphereEnv import MultiUAVSphereEnv
 from envs.MultiUAVSphereEnv2 import MultiUAVSphereEnvWithObstacle
+from envs.NavPolicyAdapter import NavPolicyAdapter
 
 
 class EnvCore(object):
@@ -17,54 +20,35 @@ class EnvCore(object):
     """
 
     def __init__(
-        self,
-        # —— 透传到 MultiUAVSphereEnv 的参数（按需改默认值） ——
-        N: int = 8,
-        R: float = 20.0,
-        v0: float = 4.0,
-        dt: float = 0.1,
-        d_safe: float = 2.0,
-        K_hist: int = 4,
-        k_nbr: int = 4,
-        episode_seconds: float = 40.0,
-        goal_radius: float = 20.0,
-        seed: int | None = 0,
-        align_reward: bool = True,
-
-        # —— 适配选项 ——
-        include_mask: bool = True,   # 是否把 nbr_mask 拼到每个体观测末尾
-        tanh_action: bool = True,    # 是否对输入动作做 tanh 收缩到 [-1,1]
+            self,
+            base_env: gym.Env,
+            nav_adapter: NavPolicyAdapter,
+            R: Optional[float] = None,
+            dt: Optional[float] = None,
+            gps_getter: Optional[Callable[[gym.Env], np.ndarray]] = None,
+            # 可选：在检测环境内部直接调用攻击管理器并写回 GPS
+            atk_manager: Optional[Any] = None,
+            atk_scenario: Optional[Any] = None,
+            attack_writeback: bool = False,
+            # 奖励超参
+            reward_tp: float = 1.0,
+            reward_fp: float = 1.8,
+            reward_fn: float = 3.5,
+            flip_penalty: float = 0.01,
+            delay_full_seconds: float = 3.0,
     ):
-        self._env = MultiUAVSphereEnvWithObstacle(
-            N=N, R=R, v0=v0, dt=dt, d_safe=d_safe,
-            K_hist=K_hist, k_nbr=k_nbr,
-            episode_seconds=episode_seconds,
-            goal_radius=goal_radius,
-            align_reward=align_reward,
-            seed=seed,
-        )
-
         # 基本元数据
+        self._env = Stage2DetectEnv(base_env=base_env,nav_adapter=nav_adapter,
+                                    gps_getter=gps_getter,atk_manager=atk_manager,
+                                    atk_scenario=atk_scenario,attack_writeback=attack_writeback,
+                                    reward_tp=reward_tp,reward_fp=reward_fp,reward_fn=reward_fn,
+                                    flip_penalty=flip_penalty,delay_full_seconds=delay_full_seconds)
         self.agent_num: int = self._env.N
-        self.action_dim: int = 2  # yaw/pitch
-        self.include_mask = include_mask
-        self._tanh_action = tanh_action
-
-        # 每个体观测维度：per_agent_obs_dim + (可选)k_nbr
-        self.obs_dim: int = int(self._env.per_agent_obs_dim + (self._env.k_nbr if include_mask else 0))
-
-        # —— 与官方轻量版一致的 spaces —— #
-        # 每个体一个 Box
-        self.observation_space = [
-            spaces.Box(low=-np.inf, high=+np.inf, shape=(self.obs_dim,), dtype=np.float32)
-            for _ in range(self.agent_num)
-        ]
-        # 连续动作 [-1,1]^2
-        self.action_space = [
-            spaces.Box(low=-1.0, high=+1.0, shape=(self.action_dim,), dtype=np.float32)
-            for _ in range(self.agent_num)
-        ]
-        # 共享观测：拼接所有个体的 obs
+        self.action_dim: int = 2  # 【0,1】表示判断是否收到攻击
+        self.obs_dim: int = self._env.det_dim
+        self.observation_space=[spaces.Box(low=-np.inf,high=np.inf,shape=(self.obs_dim,),dtype=np.float32)
+                                for _ in range(self.agent_num)]
+        self.action_space=(spaces.Discrete(self.action_dim) for _ in range(self.agent_num))
         share_obs_dim = self.agent_num * self.obs_dim
         self.share_observation_space = [
             spaces.Box(low=-np.inf, high=+np.inf, shape=(share_obs_dim,), dtype=np.float32)
@@ -72,56 +56,27 @@ class EnvCore(object):
         ]
 
         self._last_share_obs: np.ndarray | None = None  # (N*obs_dim,)
+    def reset(self):
+        obs,_info=self._env.reset()
+        self._last_share_obs = obs.reshape(-1)
+        return  [obs[i].copy() for i in range(self.agent_num)]
 
-    # ================== 必需接口 ==================
-
-    def reset(self) -> List[np.ndarray]:
-        obs_dict, _info = self._env.reset()
-        obs = self._flatten_obs(obs_dict)              # (N, obs_dim)
-        self._last_share_obs = obs.reshape(-1)         # (N*obs_dim,)
-        return [obs[i].copy() for i in range(self.agent_num)]
-
-    def step(self, actions: List[np.ndarray]) -> List[Any]:
-        """
-        actions: 长度 N 的 list/array，每个元素 shape=(action_dim,)
-        return:  [obs_list, rew_list, done_list, info_list]
-        """
-        a = np.asarray(actions, dtype=np.float32)
-        if a.shape != (self.agent_num, self.action_dim):
-            raise ValueError(f"actions shape must be ({self.agent_num},{self.action_dim}), got {a.shape}")
-
-        # 策略头可能未做边界；这里统一约束到 [-1,1]
-        a = np.tanh(a) if self._tanh_action else np.clip(a, -1.0, 1.0)
-
-        obs_dict, rew, terminated, truncated, info = self._env.step(a)
-        obs = self._flatten_obs(obs_dict)
+    def step(self,actions:List[np.ndarray]):
+        actions=np.asarray(actions,dtype=np.int32)
+        if actions.shape != (self.agent_num, self.action_dim):
+            raise ValueError(f"actions shape must be ({self.agent_num},{self.action_dim}), got {actions.shape}")
+        obs,rew,terminated,truncated,info=self._env.step(actions)
         self._last_share_obs = obs.reshape(-1)
 
-        # 官方轻量版返回格式（list of per-agent）
-        sub_agent_obs    = [obs[i].copy() for i in range(self.agent_num)]
+        sub_agent_obs = [obs[i].copy() for i in range(self.agent_num)]
         sub_agent_reward = [[float(rew[i])] for i in range(self.agent_num)]  # -> stack 后 (N,1)
-        done_flag        = bool(terminated or truncated)
-        sub_agent_done   = [done_flag for _ in range(self.agent_num)]
-        sub_agent_info   = [{} for _ in range(self.agent_num)]
+        done_flag = bool(terminated or truncated)
+        sub_agent_done = [done_flag for _ in range(self.agent_num)]
+        sub_agent_info = [{} for _ in range(self.agent_num)]
         if "term_reason" in info:
             sub_agent_info[0]["term_reason"] = info["term_reason"]
+        if 'det_tp_fp_fn' in info:
+            sub_agent_info[0]['det_tp_fp_fn']=info['det_tp_fp_fn']
 
         return [sub_agent_obs, sub_agent_reward, sub_agent_done, sub_agent_info]
 
-    # ================== 可选辅助 ==================
-
-    def last_share_obs(self) -> np.ndarray | None:
-        return self._last_share_obs
-
-    # ================== 内部工具 ==================
-
-    def _flatten_obs(self, obs_dict: Dict[str, np.ndarray]) -> np.ndarray:
-        """
-        把 {"obs": (N,D), "nbr_mask": (N,k)} -> (N, obs_dim)
-        """
-        base = obs_dict["obs"]
-        if self.include_mask:
-            obs = np.concatenate([base, obs_dict["nbr_mask"]], axis=1)
-        else:
-            obs = base
-        return obs.astype(np.float32)

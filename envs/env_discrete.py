@@ -8,6 +8,10 @@
 import gym
 from gym import spaces
 import numpy as np
+
+from attacke.gps_attack_manager import make_attack_injector
+from envs.NavPolicyAdapter import make_nav_policy_adapter
+from envs.env_continuous import ContinuousActionEnv
 from envs.env_core import EnvCore
 
 
@@ -18,7 +22,11 @@ class DiscreteActionEnv(object):
     """
 
     def __init__(self):
-        self.env = EnvCore()
+
+        stage1Env=ContinuousActionEnv()
+        atk_mgr,atk_type=make_attack_injector()
+        navAdapter=make_nav_policy_adapter(runner=None, env=stage1Env,deterministic=True)
+        self.env = EnvCore(base_env=stage1Env, atk_manager=atk_mgr, attack_writeback=True,nav_adapter=navAdapter)
         self.num_agent = self.env.agent_num
 
         self.signal_obs_dim = self.env.obs_dim

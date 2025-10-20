@@ -2,7 +2,7 @@
 from __future__ import annotations
 import numpy as np
 from gym import spaces
-from envs.env_core import EnvCore
+from envs.env_core2 import EnvCore2
 
 
 class ContinuousActionEnv(object):
@@ -11,7 +11,7 @@ class ContinuousActionEnv(object):
     """
 
     def __init__(self):
-        self.env = EnvCore()  # 需要改参时，直接传到 EnvCore(...) 里即可
+        self.env = EnvCore2()  # 需要改参时，直接传到 EnvCore(...) 里即可
         self.num_agent = self.env.agent_num
 
         self.signal_obs_dim = self.env.obs_dim
