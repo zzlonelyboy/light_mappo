@@ -21,10 +21,29 @@ class DiscreteActionEnv(object):
     Wrapper for discrete action environment.
     """
 
-    def __init__(self):
+    def __init__(self,seed):
+        self.seed=seed
+        print(f"[Env {(seed-1)/1000}] Initializing with seed={self.seed}")
+        self.attack_config = {
+            "rng": np.random.RandomState(self.seed),
+            "N": 8,
+            "atk_types": ("random", "replay", "stealth"),
+            # "atk_types": ("random", "replay"),
+            # "atk_types":("random","stealth"),
+            # "atk_types": ("random"),
+            # "atk_types":("stealth"),
+            "t_min_ratio": 0.05,   # 5%处开始
+            "t_max_ratio": 0.25,   # 最晚25%处开始
+            "dur_lo_ratio": 0.50,  # 至少持续50%
+            "dur_hi_ratio": 0.80,  # 最多持续80%
+            "random_sigma": 5.0,
+            "stealth_rate":3.2,
+            "replay_delay_lo": 5.0,
+            "replay_delay_hi": 20.0,
+        }
 
         stage1Env=ContinuousActionEnv()
-        atk_mgr,atk_type=make_attack_injector()
+        atk_mgr,atk_type=make_attack_injector(self.attack_config)
         navAdapter=make_nav_policy_adapter(runner=None, env=stage1Env,deterministic=True)
         self.env = EnvCore(base_env=stage1Env, atk_manager=atk_mgr, attack_writeback=True,nav_adapter=navAdapter)
         self.num_agent = self.env.agent_num
@@ -111,7 +130,6 @@ class DiscreteActionEnv(object):
 
     def seed(self, seed):
         pass
-
 
 class MultiDiscrete:
     """

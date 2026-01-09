@@ -17,11 +17,75 @@ def _t2n(x):
     return x.detach().cpu().numpy()
 
 
+class DetectionMetrics:
+    """
+    滑动窗口的检测指标计算器（用于Stage2Env GPS欺骗检测）
+    """
+    def __init__(self, window_size=100):
+        self.window_size = window_size
+        self.reset()
+    
+    def reset(self):
+        """重置所有累积指标"""
+        self.tp_buffer = []
+        self.fp_buffer = []
+        self.fn_buffer = []
+        self.tn_buffer = []
+    
+    def update(self, tp, fp, fn, tn):
+        """更新缓冲区"""
+        self.tp_buffer.append(tp)
+        self.fp_buffer.append(fp)
+        self.fn_buffer.append(fn)
+        self.tn_buffer.append(tn)
+        
+        if len(self.tp_buffer) > self.window_size:
+            self.tp_buffer.pop(0)
+            self.fp_buffer.pop(0)
+            self.fn_buffer.pop(0)
+            self.tn_buffer.pop(0)
+    
+    def compute(self):
+        """计算滑动窗口内的全局指标"""
+        if len(self.tp_buffer) == 0:
+            return {
+                'precision': 0.0,
+                'recall': 0.0,
+                'f1': 0.0,
+                'accuracy': 0.0,
+                'attack_ratio': 0.0,
+                'tp': 0, 'fp': 0, 'fn': 0, 'tn': 0
+            }
+        
+        tp = sum(self.tp_buffer)
+        fp = sum(self.fp_buffer)
+        fn = sum(self.fn_buffer)
+        tn = sum(self.tn_buffer)
+        
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        accuracy = (tp + tn) / (tp + fp + fn + tn) if (tp + fp + fn + tn) > 0 else 0.0
+        attack_ratio = (tp + fn) / (tp + fp + fn + tn) if (tp + fp + fn + tn) > 0 else 0.0
+        
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'accuracy': accuracy,
+            'attack_ratio': attack_ratio,
+            'tp': tp, 'fp': fp, 'fn': fn, 'tn': tn
+        }
+
+
 class EnvRunner(Runner):
     """Runner class to perform training, evaluation. and data collection for the MPEs. See parent class for details."""
 
     def __init__(self, config):
         super(EnvRunner, self).__init__(config)
+        # 为Stage2Env初始化检测指标跟踪器
+        if self.env_name == 'Stage2Env'  or self.env_name=="Stage2EnvISAC":
+            self.det_metrics = DetectionMetrics(window_size=100)
 
     def run(self):
         self.warmup()
@@ -46,6 +110,23 @@ class EnvRunner(Runner):
 
                 # Obser reward and next obs
                 obs, rewards, dones, infos = self.envs.step(actions_env)
+
+                # ========== 新增：累积检测指标（针对Stage2Env）==========
+                if hasattr(self, 'det_metrics'):
+                    tp = 0
+                    fp = 0
+                    fn = 0
+                    tn = 0
+                    for info in infos:
+                        # 安全获取指标（防止key不存在）
+                        if "det_tp_fp_fn_tn" in info[0]:
+                            tp += info[0]["det_tp_fp_fn_tn"][0]
+                            fp += info[0]["det_tp_fp_fn_tn"][1]
+                            fn += info[0]["det_tp_fp_fn_tn"][2]
+                            tn += info[0]["det_tp_fp_fn_tn"][3]
+                    
+                    # 更新到滑动窗口
+                    self.det_metrics.update(tp, fp, fn, tn)
 
                 data = (
                     obs,
@@ -100,13 +181,28 @@ class EnvRunner(Runner):
                 #         env_infos[agent_k] = idv_rews
 
                 train_infos["average_episode_rewards"] = np.mean(self.buffer.rewards) * self.episode_length
-                print("average episode rewards is {}".format(train_infos["average_episode_rewards"]))
-                self.log_train(train_infos, total_num_steps)
+                
+                # ========== 新增：Stage2Env的检测指标统计 ==========
+                if hasattr(self, 'det_metrics'):
+                    det_stats = self.det_metrics.compute()
+                    train_infos.update({
+                        "det_precision": det_stats['precision'],
+                        "det_recall": det_stats['recall'],
+                        "det_f1": det_stats['f1'],
+                        "det_accuracy": det_stats['accuracy'],
+                        "det_attack_ratio": det_stats['attack_ratio'],
+                    })
+                #     print(f"Detection Metrics | Precision: {det_stats['precision']:.4f}, "
+                #           f"Recall: {det_stats['recall']:.4f}, F1: {det_stats['f1']:.4f}, "
+                #           f"Accuracy: {det_stats['accuracy']:.4f}")
+                
+                # print("average episode rewards is {}".format(train_infos["average_episode_rewards"]))
+                self.log_train(train_infos, episode)
                 # self.log_env(env_infos, total_num_steps)
 
             # eval
             if episode % self.eval_interval == 0 and self.use_eval:
-                self.eval(total_num_steps)
+                self.eval(episode)
 
     def warmup(self):
         # reset env
@@ -271,7 +367,7 @@ class EnvRunner(Runner):
         eval_env_infos = {}
         eval_env_infos["eval_average_episode_rewards"] = np.sum(np.array(eval_episode_rewards), axis=0)
         eval_average_episode_rewards = np.mean(eval_env_infos["eval_average_episode_rewards"])
-        print("eval average episode rewards of agent: " + str(eval_average_episode_rewards))
+        # print("eval average episode rewards of agent: " + str(eval_average_episode_rewards))
         self.log_env(eval_env_infos, total_num_steps)
 
     @torch.no_grad()
@@ -347,7 +443,7 @@ class EnvRunner(Runner):
                 else:
                     envs.render("human")
 
-            print("average episode rewards is: " + str(np.mean(np.sum(np.array(episode_rewards), axis=0))))
+            # print("average episode rewards is: " + str(np.mean(np.sum(np.array(episode_rewards), axis=0))))
 
         # if self.all_args.save_gifs:
         #     imageio.mimsave(str(self.gif_dir) + '/render.gif', all_frames, duration=self.all_args.ifi)

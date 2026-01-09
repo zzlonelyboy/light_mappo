@@ -51,7 +51,7 @@ class RMAPPO():
 
         self._entropy_coef_init = float(self.entropy_coef)
         self._entropy_coef_final = 0.0      # 退火到 0
-        self._entropy_anneal_steps = 100000 # 退火总“更新次数”（按 train() 次数计）
+        self._entropy_anneal_steps = 1000000 # 退火总“更新次数”（按 train() 次数计）
         self._entropy_anneal_count = 0      # 已完成的更新计数
 
         assert (self._use_popart and self._use_valuenorm) == False, (

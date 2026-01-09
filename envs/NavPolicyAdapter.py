@@ -56,20 +56,24 @@ def make_nav_policy_adapter(runner: Any, env:gym.Env,deterministic: bool = True,
     if runner ==None:
         parser=get_config()
         parser.add_argument("--saved_model_dir", type=str,
-                            default="D:\\Reproduction_of_the_paper\\light_mappo\\results\\MyEnv\\MyEnv\\mappo\\check\\run2\\models",
+                            default="D:\\Codes\\新建文件夹\\light_mappo\\results\\MyEnv\\MyEnv\\mappo\\check\\run13\\models",
                             help="包含 actor_agent*.pt / critic_agent*.pt 的目录")
         parser.add_argument("--num_agents", type=int, default=env.num_agent)
         args=parser.parse_args()
         args.n_rollout_threads=1
+        args.layer_N=2
+        args.use_ReLU=False
         device = torch.device("cuda:0" if torch.cuda.is_available() and getattr(args, "cuda", True) else "cpu")
         args.test_n_rollout_threads = 1
         run_dir=Path("./stageOne_tmp")
+        args.model_dir=None
         runner=Runner({
             "all_args": args,
             "envs":env,
             "num_agents": args.num_agents,
             "device":device,
-            'run_dir':run_dir
+            'run_dir':run_dir,
+            # 'device': 'cpu'
         })
         for aid in range(args.num_agents):
             _load_agent_ckpt(runner.trainer[aid], aid, args.saved_model_dir, device)

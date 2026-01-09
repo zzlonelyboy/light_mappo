@@ -133,7 +133,7 @@ GPSAttackManager, GPSAttackScenario = _import_attack_manager()
 # ========== CLI ==========
 def add_eval_args(parser: argparse.ArgumentParser):
     parser.add_argument("--saved_model_dir", type=str,
-                        default="D:\\Reproduction_of_the_paper\\light_mappo\\results\\MyEnv\\MyEnv\\mappo\\check\\run2\\models",
+                        default="/home/zz/project_Uavs_gps_spoofing_detect/light_mappo/results/MyEnv/MyEnv/mappo/check/run13/models",
                         help="包含 actor_agent*.pt / critic_agent*.pt 的目录")
     parser.add_argument("--n_eval_episodes", type=int, default=200)
     parser.add_argument("--deterministic_eval", action="store_true", default=True)
@@ -141,7 +141,7 @@ def add_eval_args(parser: argparse.ArgumentParser):
 
     # 攻击参数（默认不启用攻击请改为不传本 flag；此处默认 True 以便演示）e
     parser.add_argument("--enable_attack", action="store_true",
-                        help="启用则在动作前注入GPS攻击并重算观测", default=True)
+                        help="启用则在动作前注入GPS攻击并重算观测", default=False)
     parser.add_argument("--atk_types", type=str, default="random,replay,stealth")
     parser.add_argument("--p_global", type=float, default=0.7)
     parser.add_argument("--t_min_ratio", type=float, default=0.2)

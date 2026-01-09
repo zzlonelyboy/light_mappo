@@ -1,5 +1,8 @@
 # file: envs/continuous_action_env.py
 from __future__ import annotations
+
+from typing import Optional
+
 import numpy as np
 from gym import spaces
 from envs.env_core2 import EnvCore2
@@ -39,8 +42,8 @@ class ContinuousActionEnv(object):
             infos_list,                   # list(dict)
         )
 
-    def reset(self):
-        obs_list = self.env.reset()
+    def reset(self,options: Optional[dict] = None):
+        obs_list = self.env.reset(options)
         return np.stack(obs_list)         # -> (N, obs_dim)
 
     def close(self):

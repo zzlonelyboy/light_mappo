@@ -79,7 +79,7 @@ def aabb_signed_distance(P: np.ndarray, c: np.ndarray, h: np.ndarray) -> np.ndar
 
 # ------------------------- 环境定义 -------------------------
 
-class MultiUAVSphereEnvWithObstacleBak(gym.Env):
+class MultiUAVSphereEnvWithObstacle(gym.Env):
     """Stage-1 多无人机球面编队环境（含可控数量的方形障碍物）。"""
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
@@ -129,7 +129,7 @@ class MultiUAVSphereEnvWithObstacleBak(gym.Env):
         # 障碍物碰撞（终止）惩罚
         R_obs_coll_ind: float = 300.0,    # 进入盒体的个体惩罚
         R_obs_coll_shared: float = 0.0,   # 团队连带（可 0）
-        R_tout: float = 20.0              # 可选超时惩罚（默认未启用）
+        R_tout: float = 20.0,              # 可选超时惩罚（默认未启用）
     ) -> None:
         super().__init__()
 
@@ -183,7 +183,6 @@ class MultiUAVSphereEnvWithObstacleBak(gym.Env):
         # AABB 列表：每个元素 (center[np.float32(3,)], half[np.float32(3,)])
         self.obstacles: List[Tuple[np.ndarray, np.ndarray]] = []
         self._obstacles_fixed: bool = False  # True 表示用户手动设置，reset 不再随机重置
-
         # ---- 空间定义 ----
         self.action_space = Box(low=-1.0, high=1.0, shape=(self.N, 2), dtype=np.float32)
         self.per_agent_obs_dim = self._compute_per_agent_obs_dim()
@@ -236,15 +235,26 @@ class MultiUAVSphereEnvWithObstacleBak(gym.Env):
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         if seed is not None:
             self._rng.seed(seed)
+        options = options or {}
         self.t = 0
 
-        # 目标与重心（原点）
-        self.c = np.zeros(3, dtype=np.float32)
+        # ---------- 起点重心 c：默认原点；options 可覆盖 ----------
+        start_opt = options.get("start", None)
+        if start_opt is not None:
+            self.c = np.asarray(start_opt, dtype=np.float32).copy()
+        else:
+            self.c = np.zeros(3, dtype=np.float32)
         self.true_c = self.c.copy()
-        goal_dist = self._rng.uniform(80.0, 120.0)
-        dir_xyz = self._rng.randn(3).astype(np.float32)
-        dir_xyz /= (np.linalg.norm(dir_xyz) + 1e-9)
-        self.g = dir_xyz * goal_dist
+
+        # ---------- 目标点 g：默认随机；options 可覆盖 ----------
+        goal_opt = options.get("goal", None)
+        if goal_opt is not None:
+            self.g = np.asarray(goal_opt, dtype=np.float32).copy()
+        else:
+            goal_dist = self._rng.uniform(80.0, 120.0)
+            dir_xyz = self._rng.randn(3).astype(np.float32)
+            dir_xyz /= (np.linalg.norm(dir_xyz) + 1e-9)
+            self.g = dir_xyz * goal_dist
 
         # 目标槽位方向（对齐目标方向）
         U0 = fibonacci_dirs(self.N)

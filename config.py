@@ -158,7 +158,7 @@ def get_config():
     )
 
     # prepare parameters
-    parser.add_argument("--algorithm_name", type=str, default="mappo", choices=["rmappo", "mappo"])
+    parser.add_argument("--algorithm_name", type=str, default="mappo", choices=["rmappo", "mappo", "maddpg"])
 
     parser.add_argument(
         "--experiment_name",
@@ -192,6 +192,7 @@ def get_config():
         "--n_rollout_threads",
         type=int,
         default=10,
+        # default=1,
         help="Number of parallel envs for training rollouts",
     )
     parser.add_argument(
@@ -209,21 +210,22 @@ def get_config():
     parser.add_argument(
         "--num_env_steps",
         type=int,
-        default=40e6,
+        default=20e6,
+        # default=10e6,
         help="Number of environment steps to train (default: 10e6)",
-    )
+    )   
     parser.add_argument(
         "--user_name",
         type=str,
         default="marl",
         help="[for wandb usage], to specify user's name for simply collecting training data.",
-    )
+    ) 
 
     # env parameters
     parser.add_argument("--env_name", type=str, default="Stage2Env", help="specify the name of environment")
     parser.add_argument(
         "--use_obs_instead_of_state",
-        action="store_true",
+        action="store_true",    
         default=False,
         help="Whether to use global state or concatenated obs",
     )
@@ -266,8 +268,9 @@ def get_config():
     parser.add_argument(
         "--layer_N",
         type=int,
-        # default=1,修
+        # default=1,
         default=2,
+        # default=3,
         help="Number of layers for actor/critic networks",
     )
     parser.add_argument("--use_ReLU", action="store_false", 
@@ -360,7 +363,7 @@ def get_config():
     parser.add_argument(
         "--entropy_coef",
         type=float,
-        default=0.01,
+        default=0.05,
         help="entropy term coefficient (default: 0.01)",
     )
     parser.add_argument(
@@ -424,6 +427,32 @@ def get_config():
         help="by default True, whether to mask useless data in policy loss.",
     )
     parser.add_argument("--huber_delta", type=float, default=10.0, help=" coefficience of huber loss.")
+
+    # MADDPG parameters
+    parser.add_argument(
+        "--tau",
+        type=float,
+        default=0.001,
+        help="Target network soft update rate for MADDPG (default: 0.001)",
+    )
+    parser.add_argument(
+        "--maddpg_batch_size",
+        type=int,
+        default=256,
+        help="Batch size for MADDPG training (default: 32)",
+    )
+    parser.add_argument(
+        "--maddpg_replay_buffer_size",
+        type=float,
+        default=1e6,
+        help="Replay buffer size for MADDPG (default: 1e6)",
+    )
+    parser.add_argument(
+        "--maddpg_train_interval",
+        type=int,
+        default=100,
+        help="Update frequency for MADDPG training (default: 100 steps)",
+    )
 
     # run parameters
     parser.add_argument(

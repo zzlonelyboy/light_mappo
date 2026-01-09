@@ -70,3 +70,49 @@ def tile_images(img_nhwc):
     img_HhWwc = img_HWhwc.transpose(0, 2, 1, 3, 4)
     img_Hh_Ww_c = img_HhWwc.reshape(H*h, W*w, c)
     return img_Hh_Ww_c
+
+
+
+#ISAC测距
+def _estimate_p_from_ranges(
+    self,
+    anchors: np.ndarray,      # (M,3)
+    r: np.ndarray,            # (N,M)
+    mask: np.ndarray,         # (N,M)
+    p_init: np.ndarray,       # (N,3) init
+    iters: int = 5,
+    lam: float = 1e-3,
+) -> np.ndarray:
+    """用 ISAC range 反解 p_isac（每个agent单独GN迭代）"""
+    N, M = r.shape
+    p = p_init.astype(np.float32).copy()
+    A = anchors.astype(np.float32)
+
+    for _ in range(iters):
+        for i in range(N):
+            mi = mask[i].astype(bool)
+            if mi.sum() < 4:  # 少于4个anchor，问题不稳定（3D）
+                continue
+
+            Ai = A[mi]               # (K,3)
+            ri = r[i, mi]            # (K,)
+            pi = p[i]                # (3,)
+
+            diff = pi[None, :] - Ai  # (K,3)
+            di = np.linalg.norm(diff, axis=1) + 1e-9  # (K,)
+            res = (di - ri)          # (K,)
+
+            # Jacobian: ∂(||p-a||)/∂p = (p-a)/||p-a||
+            J = diff / di[:, None]   # (K,3)
+
+            # Solve (J^T J + lam I) dx = -J^T res
+            H = J.T @ J + lam * np.eye(3, dtype=np.float32)
+            g = J.T @ res
+            try:
+                dx = -np.linalg.solve(H, g).astype(np.float32)
+            except np.linalg.LinAlgError:
+                continue
+
+            p[i] = pi + dx
+
+    return p

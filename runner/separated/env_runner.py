@@ -14,9 +14,118 @@ def _t2n(x):
     return x.detach().cpu().numpy()
 
 
+# ========== 新增：检测指标跟踪器 ==========
+class DetectionMetrics:
+    """
+    滑动窗口的检测指标计算器
+    解决原有代码中每step计算导致的震荡问题
+    """
+    def __init__(self, window_size=100):
+        """
+        Args:
+            window_size: 滑动窗口大小（step数），建议设为log_interval的整数倍
+        """
+        self.window_size = window_size
+        self.reset()
+    
+    def reset(self):
+        """重置所有累积指标"""
+        self.tp_buffer = []
+        self.fp_buffer = []
+        self.fn_buffer = []
+        self.tn_buffer = []
+    
+    def update(self, tp, fp, fn, tn):
+        """
+        更新缓冲区
+        Args:
+            tp, fp, fn, tn: 当前step的统计量（标量）
+        """
+        self.tp_buffer.append(tp)
+        self.fp_buffer.append(fp)
+        self.fn_buffer.append(fn)
+        self.tn_buffer.append(tn)
+        
+        # 保持窗口大小
+        if len(self.tp_buffer) > self.window_size:
+            self.tp_buffer.pop(0)
+            self.fp_buffer.pop(0)
+            self.fn_buffer.pop(0)
+            self.tn_buffer.pop(0)
+    
+    def compute(self):
+        """
+        计算滑动窗口内的全局指标
+        Returns:
+            dict: 包含precision, recall, f1, accuracy等指标
+        """
+        if len(self.tp_buffer) == 0:
+            return {
+                'precision': 0.0,
+                'recall': 0.0,
+                'f1': 0.0,
+                'accuracy': 0.0,
+                'total_samples': 0,
+                'attack_samples': 0,
+            }
+        
+        total_tp = sum(self.tp_buffer)
+        total_fp = sum(self.fp_buffer)
+        total_fn = sum(self.fn_buffer)
+        total_tn = sum(self.tn_buffer)
+        
+        # ✅ 修复：全局累积计算，避免除零
+        if total_tp + total_fp > 0:
+            precision = total_tp / (total_tp + total_fp)
+        else:
+            precision = 0.0  # 无预测为正样本时，精确率未定义，用0
+        
+        if total_tp + total_fn > 0:
+            recall = total_tp / (total_tp + total_fn)
+        else:
+            recall = 0.0  # ✅ 修复：无真实正样本时，召回率用0而非1.0
+        
+        if precision + recall > 0:
+            f1 = 2 * precision * recall / (precision + recall)
+        else:
+            f1 = 0.0
+        
+        # 准确率
+        total_samples = total_tp + total_fp + total_fn + total_tn
+        if total_samples > 0:
+            accuracy = (total_tp + total_tn) / total_samples
+        else:
+            accuracy = 0.0
+        
+        # 攻击样本占比
+        attack_samples = total_tp + total_fn
+        
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'accuracy': accuracy,
+            'total_samples': int(total_samples),
+            'attack_samples': int(attack_samples),
+            'attack_ratio': attack_samples / max(1, total_samples),
+            # 调试用：原始计数
+            'tp': int(total_tp),
+            'fp': int(total_fp),
+            'fn': int(total_fn),
+            'tn': int(total_tn),
+        }
+
+
 class EnvRunner(Runner):
     def __init__(self, config):
         super(EnvRunner, self).__init__(config)
+        
+        # ========== 新增：初始化检测指标跟踪器 ==========
+        if self.env_name == 'Stage2Env' or self.env_name=="Stage2EnvISAC":
+            # 窗口大小设为log_interval的2倍，确保有足够样本
+            window_size = max(100, self.log_interval * self.episode_length * 2)
+            self.det_metrics = DetectionMetrics(window_size=window_size)
+            # print(f"[DetectionMetrics] Initialized with window_size={window_size}")
 
     def run(self):
         self.warmup()
@@ -25,9 +134,10 @@ class EnvRunner(Runner):
         episodes = int(self.num_env_steps) // self.episode_length // self.n_rollout_threads
 
         for episode in range(episodes):
-            success=0
-            col=0
-            timeout=0
+            success = 0
+            col = 0
+            timeout = 0
+            
             if self.use_linear_lr_decay:
                 for agent_id in range(self.num_agents):
                     self.trainer[agent_id].policy.lr_decay(episode, episodes)
@@ -43,9 +153,12 @@ class EnvRunner(Runner):
                     actions_env,
                 ) = self.collect(step)
 
-                # Obser reward and next obs
+                # Observe reward and next obs
                 obs, rewards, dones, infos = self.envs.step(actions_env)
-                for i,done_list in enumerate(dones):
+                
+                # ========== 原有的成功率统计（针对MPE/MyEnv）==========
+                if self.env_name == "MyEnv":
+                    for i, done_list in enumerate(dones):
                         if done_list[0]:
                             if infos[i][0]["term_reason"] == "success":
                                 success += 1
@@ -53,14 +166,24 @@ class EnvRunner(Runner):
                                 col += 1
                             elif infos[i][0]["term_reason"] == "timeout":
                                 timeout += 1
-
-                fp=0
-                fn=0
-                for info in infos:
-                    fp+=info[0]['det_tp_fp_fn'][0]
-                    fn+=info[0]['det_tp_fp_fn'][1]+info[0]['det_tp_fp_fn'][2]
-                det_precision=fp*1.0/(fp+fn)
-                det_recall=fn*1.0/(fp+fn)
+                
+                # ========== 新增：累积检测指标（针对Stage2Env）==========
+                if self.env_name == 'Stage2Env' or self.env_name=="Stage2EnvISAC":
+                    tp = 0
+                    fp = 0
+                    fn = 0
+                    tn = 0
+                    for info in infos:
+                        # 安全获取指标（防止key不存在）
+                        if "det_tp_fp_fn_tn" in info[0]:
+                            tp += info[0]["det_tp_fp_fn_tn"][0]
+                            fp += info[0]["det_tp_fp_fn_tn"][1]
+                            fn += info[0]["det_tp_fp_fn_tn"][2]
+                            tn += info[0]["det_tp_fp_fn_tn"][3]
+                    
+                    # 更新到滑动窗口
+                    self.det_metrics.update(tp, fp, fn, tn)
+                
                 data = (
                     obs,
                     rewards,
@@ -103,39 +226,68 @@ class EnvRunner(Runner):
                     )
                 )
 
-                if self.env_name == "MPE" or self.env_name == "MyEnv" :
+                # ========== MPE/MyEnv的原有统计 ==========
+                if self.env_name == "MPE" or self.env_name == "MyEnv":
                     train_infos[0].update({
-                        # "success": success,
-                        # "collision": col,
-                        # "timeout": timeout,
-                        "success_rate": success*1.0 / max(1,(success+col+timeout)),
-                        "collision_rate": col*1.0 / max(1,(success+col+timeout)),
-                        "timeout_rate": timeout*1.0 / max(1,(success+col+timeout)),
+                        "success_rate": success * 1.0 / max(1, (success + col + timeout)),
+                        "collision_rate": col * 1.0 / max(1, (success + col + timeout)),
+                        "timeout_rate": timeout * 1.0 / max(1, (success + col + timeout)),
                     })
                     for agent_id in range(self.num_agents):
-                    #     idv_rews = []
-                    #     for info in infos:
-                    #         if "individual_reward" in info[agent_id].keys():
-                    #             idv_rews.append(info[agent_id]["individual_reward"])
-                    #     train_infos[agent_id].update({"individual_rewards": np.mean(idv_rews)})
                         train_infos[agent_id].update(
                             {
                                 "average_episode_rewards": np.mean(self.buffer[agent_id].rewards)
                                 * self.episode_length
                             }
                         )
-                if self.env_name=='Stage2Env':
+                
+                # ========== Stage2Env的检测指标统计 ==========
+                if self.env_name == 'Stage2Env' or  self.env_name=="Stage2EnvISAC":
+                    # 计算滑动窗口内的全局指标
+                    det_stats = self.det_metrics.compute()
+                    
+                    # # 打印详细统计（方便调试）
+                    # print(
+                    #     f"[DetectionMetrics] "
+                    #     f"Precision: {det_stats['precision']:.4f}, "
+                    #     f"Recall: {det_stats['recall']:.4f}, "
+                    #     f"F1: {det_stats['f1']:.4f}, "
+                    #     f"Accuracy: {det_stats['accuracy']:.4f}, "
+                    #     f"Attack Ratio: {det_stats['attack_ratio']:.4f} "
+                    #     f"(TP={det_stats['tp']}, FP={det_stats['fp']}, "
+                    #     f"FN={det_stats['fn']}, TN={det_stats['tn']})"
+                    # )
+                    
                     for agent_id in range(self.num_agents):
                         train_infos[agent_id].update(
                             {
+                                # 基础奖励
                                 "average_episode_rewards": np.mean(self.buffer[agent_id].rewards)
-                                                           * self.episode_length,
-                                "det_precision": det_precision,
-                                "det_recall": det_recall,
+                                * self.episode_length,
+                                # ✅ 修复后的检测指标（全局累积）
+                                "det_precision": det_stats['precision'],
+                                "det_recall": det_stats['recall'],
+                                "f1": det_stats['f1'],
+                                # 额外指标
+                                "det_accuracy": det_stats['accuracy'],
+                                "det_attack_ratio": det_stats['attack_ratio'],
+                                # 原始计数（用于调试）
+                                "det_tp": det_stats['tp'],
+                                "det_fp": det_stats['fp'],
+                                "det_fn": det_stats['fn'],
+                                "det_tn": det_stats['tn'],
                             }
                         )
-                # self.log_train(train_infos, total_num_steps)
-                self.log_train(train_infos,episode)
+                    
+                    # ========== 可选：定期重置窗口（避免过度平滑）==========
+                    # 如果想每隔N个log_interval重置一次，取消下面的注释
+                    # reset_interval = 10  # 每10个log_interval重置
+                    # if episode % (self.log_interval * reset_interval) == 0 and episode > 0:
+                    #     print(f"[DetectionMetrics] Resetting window at episode {episode}")
+                    #     self.det_metrics.reset()
+                
+                self.log_train(train_infos, episode)
+            
             # eval
             if episode % self.eval_interval == 0 and self.use_eval:
                 self.eval(total_num_steps)
@@ -284,6 +436,10 @@ class EnvRunner(Runner):
         )
         eval_masks = np.ones((self.n_eval_rollout_threads, self.num_agents, 1), dtype=np.float32)
 
+        # ========== 新增：评估时也统计检测指标 ==========
+        if self.env_name == 'Stage2Env'  or self.env_name=="Stage2EnvISAC":
+            eval_det_metrics = DetectionMetrics(window_size=10000)  # 大窗口，累积整个eval
+
         for eval_step in range(self.episode_length):
             eval_temp_actions_env = []
             for agent_id in range(self.num_agents):
@@ -328,6 +484,17 @@ class EnvRunner(Runner):
             eval_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(eval_actions_env)
             eval_episode_rewards.append(eval_rewards)
 
+            # ========== 新增：累积eval检测指标 ==========
+            if self.env_name == 'Stage2Env'  or self.env_name=="Stage2EnvISAC":
+                tp, fp, fn, tn = 0, 0, 0, 0
+                for info in eval_infos:
+                    if "det_tp_fp_fn_tn" in info[0]:
+                        tp += info[0]["det_tp_fp_fn_tn"][0]
+                        fp += info[0]["det_tp_fp_fn_tn"][1]
+                        fn += info[0]["det_tp_fp_fn_tn"][2]
+                        tn += info[0]["det_tp_fp_fn_tn"][3]
+                eval_det_metrics.update(tp, fp, fn, tn)
+
             eval_rnn_states[eval_dones == True] = np.zeros(
                 ((eval_dones == True).sum(), self.recurrent_N, self.hidden_size),
                 dtype=np.float32,
@@ -340,13 +507,30 @@ class EnvRunner(Runner):
         eval_train_infos = []
         for agent_id in range(self.num_agents):
             eval_average_episode_rewards = np.mean(np.sum(eval_episode_rewards[:, :, agent_id], axis=0))
-            eval_train_infos.append({"eval_average_episode_rewards": eval_average_episode_rewards})
+            info_dict = {"eval_average_episode_rewards": eval_average_episode_rewards}
+            
+            # ========== 新增：记录eval检测指标 ==========
+            if self.env_name == 'Stage2Env'  or self.env_name=="Stage2EnvISAC":
+                eval_det_stats = eval_det_metrics.compute()
+                info_dict.update({
+                    "eval_det_precision": eval_det_stats['precision'],
+                    "eval_det_recall": eval_det_stats['recall'],
+                    "eval_f1": eval_det_stats['f1'],
+                    "eval_det_accuracy": eval_det_stats['accuracy'],
+                })
+                if agent_id == 0:  # 只打印一次
+                    print(f"[Eval] Precision: {eval_det_stats['precision']:.4f}, "
+                          f"Recall: {eval_det_stats['recall']:.4f}, "
+                          f"F1: {eval_det_stats['f1']:.4f}")
+            
+            eval_train_infos.append(info_dict)
             print("eval average episode rewards of agent%i: " % agent_id + str(eval_average_episode_rewards))
 
         self.log_train(eval_train_infos, total_num_steps)
 
     @torch.no_grad()
     def render(self):
+        # 渲染函数保持不变
         all_frames = []
         for episode in range(self.all_args.render_episodes):
             episode_rewards = []
