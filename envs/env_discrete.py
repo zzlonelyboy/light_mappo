@@ -21,10 +21,94 @@ class DiscreteActionEnv(object):
     Wrapper for discrete action environment.
     """
 
-    def __init__(self):
+    def __init__(self,seed):
+        self.seed=seed
+        print(f"[Env {(seed-1)/1000}] Initializing with seed={self.seed}")
+        # self.attack_config = {
+        #     "rng": np.random.RandomState(self.seed),
+        #     "N": 8,
+        #     "atk_types": ("random", "replay", "stealth"),
+        #     # "atk_types": ("random", "replay"),
+        #     # "atk_types":("random","stealth"),
+        #     # "atk_types": ("random"),
+        #     # "atk_types":("stealth"),
+        #     "t_min_ratio": 0.05,   # 5%处开始
+        #     "t_max_ratio": 0.25,   # 最晚25%处开始
+        #     "dur_lo_ratio": 0.50,  # 至少持续50%
+        #     "dur_hi_ratio": 0.80,  # 最多持续80%
+        #     "random_sigma": 5.0,
+        #     "stealth_rate":3.2,
+        #     "replay_delay_lo": 5.0,
+        #     "replay_delay_hi": 20.0,
+        # }
+        # self.attack_config = {
+        #     "rng": np.random.RandomState(self.seed),
+        #     "N": 8,
+        #     "atk_types": ("random", "replay", "stealth"),
+        #
+        #     "t_min_ratio": 0.05,
+        #     "t_max_ratio": 0.25,
+        #
+        #     # 持续时间也建议缩短，否则 stealth 容易累计过头
+        #     "dur_lo_ratio": 0.50,
+        #     "dur_hi_ratio": 0.80,
+        #
+        #     # random: 单次扰动控制在亚米级
+        #     # "random_sigma": 0.35,
+        #     "random_sigma":2,
+        #
+        #     # stealth: 慢漂移控制在 0.5~1m
+        #     # "stealth_rate": 0.03,
+        #     "stealth_rate":0.5,
+        #     # replay: 延时压到很小
+        #     "replay_delay_lo": 0.2,
+        #     "replay_delay_hi": 0.8,
+        # }
+        # self.attack_config = {
+        #     "rng": np.random.RandomState(self.seed),
+        #     "N": 8,
+        #     # "atk_types": ("random", "replay", "stealth"),   # 先去掉 replay 做对照
+        #     "atk_types": ("stealth",),
+        #     "t_min_ratio": 0.10,
+        #     "t_max_ratio": 0.30,
+        #     "dur_lo_ratio": 0.20,
+        #     "dur_hi_ratio": 0.40,
+        #     "random_sigma": 1.0,
+        #     # "stealth_rate": 0.10,
+        #     "stealth_rate": 0.10,
+        #     "replay_delay_lo": 0.5,
+        #     "replay_delay_hi": 1.5,
+        #     "p_global": False,
+        # }
+
+        self.attack_config = {
+            "rng": np.random.RandomState(self.seed),
+            "N": 8,
+            # "atk_types":(),
+            # "atk_type":("none",),
+            "atk_types": ("random", "replay", "stealth"),
+            # "atk_types":("stealth",),
+            "t_min_ratio": 0.10,
+            "t_max_ratio": 0.30,
+            "dur_lo_ratio": 0.20,
+            "dur_hi_ratio": 0.40,
+
+            # "random_sigma": 1.5,
+            # "stealth_rate": 1.5,
+
+            "random_sigma": 3,
+            "stealth_rate": 3.5,
+            "replay_delay_lo": 0.5,
+            "replay_delay_hi": 1.5,
+            "p_global": False,
+
+            "replay_jitter_seconds": 0.18,
+            "stealth_dir_jitter": 0.90,
+            "stealth_pull_ratio": 0.45,
+        }
 
         stage1Env=ContinuousActionEnv()
-        atk_mgr,atk_type=make_attack_injector()
+        atk_mgr,atk_type=make_attack_injector(self.attack_config)
         navAdapter=make_nav_policy_adapter(runner=None, env=stage1Env,deterministic=True)
         self.env = EnvCore(base_env=stage1Env, atk_manager=atk_mgr, attack_writeback=True,nav_adapter=navAdapter)
         self.num_agent = self.env.agent_num
@@ -111,7 +195,6 @@ class DiscreteActionEnv(object):
 
     def seed(self, seed):
         pass
-
 
 class MultiDiscrete:
     """

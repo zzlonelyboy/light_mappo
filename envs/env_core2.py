@@ -6,7 +6,7 @@ from gym import spaces
 
 # 改成你实际的导入路径
 from envs.MultiUAVSphereEnv import MultiUAVSphereEnv
-from envs.MultiUAVSphereEnv2 import MultiUAVSphereEnvWithObstacle
+from envs.MultiUAVSphereEnv3 import MultiUAVSphereEnvWithObstacle
 
 
 class EnvCore2(object):
@@ -75,8 +75,8 @@ class EnvCore2(object):
 
     # ================== 必需接口 ==================
 
-    def reset(self) -> List[np.ndarray]:
-        obs_dict, _info = self._env.reset()
+    def reset(self,options: Optional[dict] = None) -> List[np.ndarray]:
+        obs_dict, _info = self._env.reset(options=options)
         obs = self._flatten_obs(obs_dict)              # (N, obs_dim)
         self._last_share_obs = obs.reshape(-1)         # (N*obs_dim,)
         return [obs[i].copy() for i in range(self.agent_num)]

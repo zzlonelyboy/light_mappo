@@ -158,7 +158,7 @@ def get_config():
     )
 
     # prepare parameters
-    parser.add_argument("--algorithm_name", type=str, default="mappo", choices=["rmappo", "mappo"])
+    parser.add_argument("--algorithm_name", type=str, default="mappo", choices=["rmappo", "mappo", "maddpg"])
 
     parser.add_argument(
         "--experiment_name",
@@ -185,19 +185,20 @@ def get_config():
     parser.add_argument(
         "--n_training_threads",
         type=int,
-        default=2,
+        default=1,
         help="Number of torch threads for training",
     )
     parser.add_argument(
         "--n_rollout_threads",
         type=int,
         default=10,
+        # default=1,
         help="Number of parallel envs for training rollouts",
     )
     parser.add_argument(
         "--n_eval_rollout_threads",
         type=int,
-        default=2,
+        default=1,
         help="Number of parallel envs for evaluating rollouts",
     )
     parser.add_argument(
@@ -209,21 +210,23 @@ def get_config():
     parser.add_argument(
         "--num_env_steps",
         type=int,
-        default=40e6,
+        # default=40e6,
+        default=10e6,
+        # default=10e6,
         help="Number of environment steps to train (default: 10e6)",
-    )
+    )   
     parser.add_argument(
         "--user_name",
         type=str,
         default="marl",
         help="[for wandb usage], to specify user's name for simply collecting training data.",
-    )
+    ) 
 
     # env parameters
-    parser.add_argument("--env_name", type=str, default="Stage2Env", help="specify the name of environment")
+    parser.add_argument("--env_name", type=str, default="stage2DetectEnvISAC", help="specify the name of environment")
     parser.add_argument(
         "--use_obs_instead_of_state",
-        action="store_true",
+        action="store_true",    
         default=False,
         help="Whether to use global state or concatenated obs",
     )
@@ -235,7 +238,7 @@ def get_config():
     parser.add_argument(
         "--share_policy",
         action="store_false",
-        default=False,
+        default=True,
         help="Whether agent share the same policy",
     )
     parser.add_argument(
@@ -259,20 +262,20 @@ def get_config():
     parser.add_argument(
         "--hidden_size",
         type=int,
-        # default=64,修
-        default=128,
+        # default=64,
+         default=128,
         help="Dimension of hidden layers for actor/critic networks",
     )
     parser.add_argument(
         "--layer_N",
         type=int,
-        # default=1,修
-        default=2,
+        # default=2,
+        default=3,
         help="Number of layers for actor/critic networks",
     )
     parser.add_argument("--use_ReLU", action="store_false", 
-                        # default=True,修
-                        default=False,
+                        default=True,
+                        # default=False,
                         help="Whether to use ReLU")
     parser.add_argument(
         "--use_popart",
@@ -309,7 +312,7 @@ def get_config():
     )
     parser.add_argument(
         "--use_recurrent_policy",
-        action="store_false",
+        action="store_true",
         default=False,
         help="use a recurrent policy",
     )
@@ -322,11 +325,12 @@ def get_config():
     )
 
     # optimizer parameters
-    parser.add_argument("--lr", type=float, default=1e-4, help="learning rate (default: 5e-4)")
+    parser.add_argument("--lr", type=float, default=5e-5, help="learning rate (default: 5e-4)")
     parser.add_argument(
         "--critic_lr",
         type=float,
-        default=3e-4,
+        # default=3e-4
+        default=2e-4,
         help="critic learning rate (default: 5e-4)",
     )
     parser.add_argument(
@@ -360,6 +364,7 @@ def get_config():
     parser.add_argument(
         "--entropy_coef",
         type=float,
+        # default=0.05,
         default=0.01,
         help="entropy term coefficient (default: 0.01)",
     )
@@ -424,6 +429,32 @@ def get_config():
         help="by default True, whether to mask useless data in policy loss.",
     )
     parser.add_argument("--huber_delta", type=float, default=10.0, help=" coefficience of huber loss.")
+
+    # MADDPG parameters
+    parser.add_argument(
+        "--tau",
+        type=float,
+        default=0.001,
+        help="Target network soft update rate for MADDPG (default: 0.001)",
+    )
+    parser.add_argument(
+        "--maddpg_batch_size",
+        type=int,
+        default=256,
+        help="Batch size for MADDPG training (default: 32)",
+    )
+    parser.add_argument(
+        "--maddpg_replay_buffer_size",
+        type=float,
+        default=1e6,
+        help="Replay buffer size for MADDPG (default: 1e6)",
+    )
+    parser.add_argument(
+        "--maddpg_train_interval",
+        type=int,
+        default=100,
+        help="Update frequency for MADDPG training (default: 100 steps)",
+    )
 
     # run parameters
     parser.add_argument(

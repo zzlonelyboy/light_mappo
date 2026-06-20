@@ -1,0 +1,1419 @@
+from __future__ import annotations
+
+from typing import Callable, Optional, Any, Dict, Tuple
+from collections import deque
+import numpy as np
+import gym
+from gym.spaces import Box, MultiDiscrete
+
+from envs.NavPolicyAdapter import NavPolicyAdapter
+
+
+# ============================================================
+# Utils
+# ============================================================
+def _unit(x: np.ndarray, eps: float = 1e-9) -> np.ndarray:
+    n = np.linalg.norm(x, axis=-1, keepdims=True)
+    return x / (n + eps)
+
+
+def _cos_sim(a: np.ndarray, b: np.ndarray, eps: float = 1e-9) -> np.ndarray:
+    na = np.linalg.norm(a, axis=-1)
+    nb = np.linalg.norm(b, axis=-1)
+    dot = np.sum(a * b, axis=-1)
+    return np.clip(dot / (na * nb + eps), -1.0, 1.0)
+
+
+# ============================================================
+# ISAC measurement generator
+# ============================================================
+class ISACGenerator:
+    """
+    Output:
+      - r:        (N,M)  noisy range
+      - u:        (N,M,3) noisy LOS unit vector
+      - dop:      (N,M) noisy radial velocity / Doppler
+      - mask:     (N,M) 1 valid / 0 invalid
+      - rho:      (N,M) linear SNR
+      - rho_db:   (N,M) dB SNR
+      - sigma_r2: (N,M)
+      - sigma_d2: (N,M)
+      - sigma_u2: (N,M)
+      - anchors:  (M,3)
+    """
+
+    def __init__(
+        self,
+        anchors: np.ndarray,                   # (M,3)
+
+        # ----- OFDM / link-budget related -----
+        fc_hz: float = 3.5e9,
+        bw_hz: float = 40e6,
+
+        pt_dbm: float = 27.0,
+        gt_dbi: float = 0.0,
+        gr_dbi: float = 6.0,
+        nf_db: float = 7.0,
+        misc_loss_db: float = 5.0,
+
+        # ----- path loss -----
+        pl_a_db: float = 30.0,
+        pl_alpha_los: float = 2.0,
+        pl_alpha_nlos: float = 3.75,
+        use_nlos: bool = False,
+
+        # ----- SNR clipping / validity -----
+        rho_clip_db_min: float = -10.0,
+        rho_clip_db_max: float = 40.0,
+        rho_valid_threshold_db: float = 0.0,
+
+        # ----- fixed kappas -----
+        kappa_r: float = 8.55,
+        kappa_d: float = 4.45,
+        kappa_u: float = 0.00563,
+
+        # ----- optional random invalidation -----
+        p_dropout: float = 0.0,
+        rng: Optional[np.random.RandomState] = None,
+    ):
+        self.anchors = np.asarray(anchors, dtype=np.float32)
+        if self.anchors.ndim != 2 or self.anchors.shape[1] != 3:
+            raise ValueError("anchors must be of shape (M,3)")
+        self.M = int(self.anchors.shape[0])
+
+        # OFDM / link budget
+        self.fc_hz = float(fc_hz)
+        self.bw_hz = float(bw_hz)
+
+        self.pt_dbm = float(pt_dbm)
+        self.gt_dbi = float(gt_dbi)
+        self.gr_dbi = float(gr_dbi)
+
+        # 保持与你原代码一致：当前不显式使用 nf_db / misc_loss_db
+        # 如果后续你想补物理一致性，可在 _compute_rho() 中加入
+        # self.nf_db = float(nf_db)
+        # self.misc_loss_db = float(misc_loss_db)
+
+        # path loss
+        self.pl_a_db = float(pl_a_db)
+        self.pl_alpha_los = float(pl_alpha_los)
+        self.pl_alpha_nlos = float(pl_alpha_nlos)
+        self.use_nlos = bool(use_nlos)
+
+        # SNR clipping / validity
+        self.rho_clip_db_min = float(rho_clip_db_min)
+        self.rho_clip_db_max = float(rho_clip_db_max)
+        self.rho_valid_threshold_db = float(rho_valid_threshold_db)
+
+        # fixed kappas
+        self.kappa_r = float(kappa_r)
+        self.kappa_d = float(kappa_d)
+        self.kappa_u = float(kappa_u)
+
+        self.p_dropout = float(p_dropout)
+        self.rng = np.random.RandomState(0) if rng is None else rng
+
+    def _pathloss_db(self, dist: np.ndarray) -> np.ndarray:
+        d = np.maximum(dist, 1.0)
+        alpha = self.pl_alpha_nlos if self.use_nlos else self.pl_alpha_los
+        return self.pl_a_db + 10.0 * alpha * np.log10(d)
+
+    def _compute_rho(self, true_p: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Returns:
+          rho: linear SNR
+          rho_db: dB SNR
+        """
+        A = self.anchors[None, :, :]      # (1,M,3)
+        P = true_p[:, None, :]            # (N,1,3)
+        dvec = A - P
+        dist = np.linalg.norm(dvec, axis=-1) + 1e-6
+
+        pl_db = self._pathloss_db(dist)
+
+        # 与原代码保持一致
+        noise_dbm = -174.0 + 10.0 * np.log10(self.bw_hz)
+        pr_dbm = self.pt_dbm + self.gt_dbi + self.gr_dbi - pl_db
+
+        rho_db = pr_dbm - noise_dbm
+        rho_db = np.clip(rho_db, self.rho_clip_db_min, self.rho_clip_db_max)
+        rho = np.power(10.0, rho_db / 10.0).astype(np.float32)
+
+        return rho.astype(np.float32), rho_db.astype(np.float32)
+
+    def measure(self, true_p: np.ndarray, h: np.ndarray, v0: float) -> Dict[str, np.ndarray]:
+        true_p = np.asarray(true_p, dtype=np.float32)   # (N,3)
+        h = np.asarray(h, dtype=np.float32)             # (N,3)
+        N = int(true_p.shape[0])
+
+        A = self.anchors[None, :, :]    # (1,M,3)
+        P = true_p[:, None, :]          # (N,1,3)
+        dvec = A - P                    # (N,M,3)
+
+        r_true = np.linalg.norm(dvec, axis=-1)
+        u_true = _unit(dvec)
+        v = (float(v0) * h)[:, None, :]
+        dop_true = np.sum(v * u_true, axis=-1)
+
+        rho, rho_db = self._compute_rho(true_p)
+
+        sigma_r2 = (self.kappa_r / np.maximum(rho, 1e-9)).astype(np.float32)
+        sigma_d2 = (self.kappa_d / np.maximum(rho, 1e-9)).astype(np.float32)
+        sigma_u2 = (self.kappa_u / np.maximum(rho, 1e-9)).astype(np.float32)
+
+        sigma_r = np.sqrt(sigma_r2).astype(np.float32)
+        sigma_d = np.sqrt(sigma_d2).astype(np.float32)
+        sigma_u = np.sqrt(sigma_u2).astype(np.float32)
+
+        r_meas = r_true + self.rng.normal(0.0, 1.0, size=r_true.shape).astype(np.float32) * sigma_r
+        dop_meas = dop_true + self.rng.normal(0.0, 1.0, size=dop_true.shape).astype(np.float32) * sigma_d
+
+        raw_noise = self.rng.normal(0.0, 1.0, size=u_true.shape).astype(np.float32)
+        proj = np.sum(raw_noise * u_true, axis=-1, keepdims=True) * u_true
+        tangent_noise = raw_noise - proj
+        tangent_noise = tangent_noise * sigma_u[:, :, None]
+        u_meas = _unit(u_true + tangent_noise)
+
+        # 你当前前提：4个anchor持续有效
+        # 这里仍保留 mask 逻辑，默认会是全1
+        rho_valid_threshold = 10.0 ** (self.rho_valid_threshold_db / 10.0)
+        mask = (rho >= rho_valid_threshold).astype(np.float32)
+
+        if self.p_dropout > 0.0:
+            drop = (self.rng.rand(N, self.M) > self.p_dropout).astype(np.float32)
+            mask *= drop
+
+        r_meas *= mask
+        dop_meas *= mask
+        u_meas *= mask[:, :, None]
+
+        return {
+            "r": r_meas.astype(np.float32),
+            "u": u_meas.astype(np.float32),
+            "dop": dop_meas.astype(np.float32),
+            "mask": mask.astype(np.float32),
+            "rho": rho.astype(np.float32),
+            "rho_db": rho_db.astype(np.float32),
+            "sigma_r2": sigma_r2.astype(np.float32),
+            "sigma_d2": sigma_d2.astype(np.float32),
+            "sigma_u2": sigma_u2.astype(np.float32),
+            "anchors": self.anchors.astype(np.float32),
+        }
+
+
+# ============================================================
+# Main environment
+# ============================================================
+class Stage2ISACDetectEnv3(gym.Env):
+    """
+    28-dim observation:
+      - local ISAC features: 12
+      - self features: 2
+      - neighbor features: 10
+      - formation features: 4
+
+    New redesigned 28-dim neighbor/formation:
+      Neighbor:
+        [rel_vec_err_mean,
+         rel_vec_err_max,
+         rel_vel_err_mean,
+         rel_vel_err_max,
+         rel_bias_norm,
+         rel_bias_proj,
+         nbr_sig_l1,
+         nbr_sig_cos,
+         nbr_quality_mean,
+         nbr_rel_cusum]
+
+      Formation:
+        [form_consensus,
+         form_outlier_z,
+         form_delta,
+         form_cusum]
+    """
+
+    metadata = {"render_modes": ["human"], "render_fps": 30}
+
+    def __init__(
+        self,
+        base_env: gym.Env,
+        gps_getter: Optional[Callable] = None,
+        anchors: Optional[np.ndarray] = None,
+
+        # OFDM-ISAC / link budget
+        fc_hz: float = 3.5e9,
+        bw_hz: float = 40e6,
+
+        pt_dbm: float = 27.0,
+        gt_dbi: float = 0.0,
+        gr_dbi: float = 6.0,
+        nf_db: float = 7.0,
+        misc_loss_db: float = 5.0,
+
+        pl_a_db: float = 30.0,
+        pl_alpha_los: float = 2.0,
+        pl_alpha_nlos: float = 3.75,
+        use_nlos: bool = False,
+
+        rho_clip_db_min: float = -10.0,
+        rho_clip_db_max: float = 40.0,
+        rho_valid_threshold_db: float = 0.0,
+
+        kappa_r: float = 8.55,
+        kappa_d: float = 4.45,
+        kappa_u: float = 0.00563,
+        p_dropout: float = 0.0,
+
+        # attack
+        atk_manager: Optional[Any] = None,
+        atk_scenario: Optional[Any] = None,
+        attack_writeback: bool = True,
+        resample_attack_on_reset: bool = True,
+
+        # normalization
+        range_scale_floor: float = 0.001,
+        doppler_scale_floor: float = 0.091,
+        pos_scale: float = 5.0,
+        k_neighbors: int = 3,
+
+        # temporal stats
+        history_window: int = 20,
+        cusum_drift: float = 0.06,
+        cusum_beta: float = 0.95,
+        cusum_max: float = 1.0,
+        cusum_waive_threshold: float = 0.72,
+        score_delta_mix: float = 0.5,
+        score_std_mix: float = 0.5,
+
+        # reward
+        reward_tp: float = 75.0,
+        reward_fp: float = 30.0,
+        reward_fn: float = 25.0,
+        reward_tn: float = 0.8,
+        stay_reward: float = 0.3,
+        flip_penalty: float = 0.06,
+        delay_full_seconds: float = 2.0,
+        fn_step_penalty: float = 0.25,
+        delay_k: float = 1.0,
+        hold_cost: float = 4.0,
+        neg_hold_grace_steps: int = 1,
+        fp_cooldown_steps: int = 3,
+        hysteresis_penalty: float = 0.3,
+
+        # smoothing
+        nbr_ema_beta: float = 0.85,
+        form_ema_beta: float = 0.85,
+
+        # WLS position proxy
+        p_isac_iters: int = 100,
+        p_isac_lam: float = 1e-3,
+        p_isac_step_clip: float = 5.0,
+        p_isac_tol: float = 0.01,
+        min_anchors_for_p_isac: int = 4,
+        use_cusum_in_reward: bool = False,
+
+        # cooperative redesign
+        vel_scale: Optional[float] = None,
+        graph_ema_beta: float = 0.8,
+        quality_snr_db_lo: float = -5.0,
+        quality_snr_db_hi: float = 15.0,
+        quality_gate: float = 0.35,
+
+        # Stage1 stepper
+        nav_stepper: Optional[NavPolicyAdapter] = None,
+    ):
+        super().__init__()
+
+        self.base = base_env
+        self.nav_stepper = nav_stepper
+        self.gps_getter = gps_getter
+        self.use_cusum_in_reward = bool(use_cusum_in_reward)
+
+        # unwrap
+        self.unwrapped_env = base_env
+        while hasattr(self.unwrapped_env, "env") or hasattr(self.unwrapped_env, "_env"):
+            if hasattr(self.unwrapped_env, "env"):
+                self.unwrapped_env = self.unwrapped_env.env
+            else:
+                self.unwrapped_env = self.unwrapped_env._env
+
+        self.N = int(getattr(self.unwrapped_env, "N", 0))
+        if self.N <= 0:
+            raise ValueError("base_env must expose positive integer attribute N")
+
+        self.dt = float(getattr(self.unwrapped_env, "dt", 0.1))
+        self.v0 = float(getattr(self.unwrapped_env, "v0", 4.0))
+
+        if anchors is None:
+            anchors = np.array(
+                [[80, 80, 0], [80, -80, 0], [-80, 80, 0], [-80, -80, 0]],
+                dtype=np.float32
+            )
+
+        self.isac_gen = ISACGenerator(
+            anchors=anchors,
+            fc_hz=fc_hz,
+            bw_hz=bw_hz,
+            pt_dbm=pt_dbm,
+            gt_dbi=gt_dbi,
+            gr_dbi=gr_dbi,
+            nf_db=nf_db,
+            misc_loss_db=misc_loss_db,
+            pl_a_db=pl_a_db,
+            pl_alpha_los=pl_alpha_los,
+            pl_alpha_nlos=pl_alpha_nlos,
+            use_nlos=use_nlos,
+            rho_clip_db_min=rho_clip_db_min,
+            rho_clip_db_max=rho_clip_db_max,
+            rho_valid_threshold_db=rho_valid_threshold_db,
+            kappa_r=kappa_r,
+            kappa_d=kappa_d,
+            kappa_u=kappa_u,
+            p_dropout=p_dropout,
+            rng=getattr(self.unwrapped_env, "_rng", None),
+        )
+        self.M = self.isac_gen.M
+
+        # attack
+        self.atk_manager = atk_manager
+        self.atk_scenario = atk_scenario
+        self.attack_writeback = bool(attack_writeback)
+        self.resample_attack_on_reset = bool(resample_attack_on_reset)
+        self._hist_true_pos = []
+        self._hist_gps_pos = []
+
+        # normalization
+        self.range_scale_floor = float(range_scale_floor)
+        self.doppler_scale_floor = float(doppler_scale_floor)
+        self.pos_scale = float(pos_scale)
+
+        # graph
+        self.k_neighbors = max(0, min(int(k_neighbors), self.N - 1))
+
+        # temporal stats
+        self.history_window = int(history_window)
+        self._score_hist = deque(maxlen=self.history_window)
+
+        self.cusum_drift = float(cusum_drift)
+        self.cusum_max = float(cusum_max)
+        self.cusum_beta = float(cusum_beta)
+        self.cusum_waive_threshold = float(cusum_waive_threshold)
+        self.score_delta_mix = float(score_delta_mix)
+        self.score_std_mix = float(score_std_mix)
+
+        self._ema_mu = None
+        self._cpos = None
+        self._cneg = None
+        self._cusum = None
+
+        # smoothing
+        self.nbr_ema_beta = float(nbr_ema_beta)
+        self._nbr_ema = None
+        self.form_ema_beta = float(form_ema_beta)
+
+        # old formation states removed / replaced
+        self._pair_err_ema = None
+        self._pair_err_cusum = None
+
+        # reward
+        self.R_TP = float(reward_tp)
+        self.R_FP = float(reward_fp)
+        self.R_FN = float(reward_fn)
+        self.R_TN = float(reward_tn)
+        self.fn_step_penalty = float(fn_step_penalty)
+        self.stay_reward = float(stay_reward)
+        self.flip_penalty = float(flip_penalty)
+        self.delay_full_seconds = float(delay_full_seconds)
+        self.delay_k = float(delay_k)
+        self.hold_cost = float(hold_cost)
+        self.neg_hold_grace_steps = int(neg_hold_grace_steps)
+        self.fp_cooldown_steps = int(fp_cooldown_steps)
+        self.hysteresis_penalty = float(hysteresis_penalty)
+
+        # position proxy
+        self.p_isac_iters = int(p_isac_iters)
+        self.p_isac_lam = float(p_isac_lam)
+        self.p_isac_step_clip = float(p_isac_step_clip)
+        self.p_isac_tol = float(p_isac_tol)
+        self.min_anchors_for_p_isac = int(min_anchors_for_p_isac)
+        self._p_isac_prev = None
+
+        # cooperative redesign params / states
+        self.vel_scale = float(self.v0 if vel_scale is None else vel_scale)
+        self.graph_ema_beta = float(graph_ema_beta)
+        self.quality_snr_db_lo = float(quality_snr_db_lo)
+        self.quality_snr_db_hi = float(quality_snr_db_hi)
+        self.quality_gate = float(quality_gate)
+
+        self._graph_ref = None
+        self._prev_p_isac = None
+
+        self._nbr_rel_ema = None
+        self._nbr_rel_cusum = None
+
+        self._form_cons_ema = None
+        self._form_cusum = None
+
+        # history / internal states
+        self._prev_gps = None
+
+        self._a_prev = np.zeros((self.N,), np.int32)
+        self._y_prevprev = np.zeros((self.N,), dtype=np.int32)
+        self._event_open = np.zeros((self.N,), dtype=bool)
+        self._detected_in_event = np.zeros((self.N,), dtype=bool)
+        self._event_t0 = np.zeros((self.N,), dtype=np.int32)
+        self._neg_hold_counter = np.zeros((self.N,), dtype=np.int32)
+        self._last_fp_step = np.full((self.N,), -10**9, dtype=np.int32)
+
+        # spaces
+        self.action_space = MultiDiscrete(np.array([2] * self.N, dtype=np.int64))
+        self.feature_names = self.get_feature_names()
+        self.obs_dim = len(self.feature_names)
+        self.observation_space = Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(self.N, self.obs_dim),
+            dtype=np.float32
+        )
+
+        self._attack_info_current: Dict[str, Any] = {}
+        self._y_current = np.zeros((self.N,), dtype=np.int32)
+
+    # ========================================================
+    # IO helpers
+    # ========================================================
+    def _get_gps(self) -> np.ndarray:
+        if callable(self.gps_getter):
+            return np.asarray(self.gps_getter(self.unwrapped_env), dtype=np.float32)
+        if hasattr(self.unwrapped_env, "gps"):
+            return np.asarray(self.unwrapped_env.gps, dtype=np.float32)
+        if hasattr(self.unwrapped_env, "p"):
+            return np.asarray(self.unwrapped_env.p, dtype=np.float32)
+        raise RuntimeError("Cannot get GPS: provide gps_getter or expose .gps/.p on base_env")
+
+    def _set_gps(self, z: np.ndarray) -> None:
+        z = np.asarray(z, dtype=np.float32)
+        if hasattr(self.unwrapped_env, "gps"):
+            setattr(self.unwrapped_env, "gps", z)
+        else:
+            setattr(self.unwrapped_env, "p", z)
+
+    def _get_heading_now(self) -> np.ndarray:
+        if hasattr(self.unwrapped_env, "h_hist"):
+            hh = getattr(self.unwrapped_env, "h_hist")
+            if isinstance(hh, (list, tuple)) and len(hh) > 0:
+                return np.asarray(hh[-1], dtype=np.float32)
+        if hasattr(self.unwrapped_env, "h"):
+            return np.asarray(getattr(self.unwrapped_env, "h"), dtype=np.float32)
+
+        h = np.zeros((self.N, 3), dtype=np.float32)
+        h[:, 0] = 1.0
+        return h
+
+    def _as_attack_mask(self, info: dict) -> np.ndarray:
+        mask = info.get("attack_mask", None)
+        if mask is None:
+            return np.zeros((self.N,), dtype=np.int32)
+        return np.asarray(mask, dtype=bool).astype(np.int32)
+
+    def _apply_attack_writeback(self) -> Dict[str, Any]:
+        if not (self.attack_writeback and (self.atk_manager is not None) and (self.atk_scenario is not None)):
+            try:
+                setattr(self.unwrapped_env, "_atk_active_mask", np.zeros((self.N,), dtype=bool))
+            except Exception:
+                pass
+            return {}
+
+        t = int(getattr(self.unwrapped_env, "t", 0))
+
+        try:
+            p_meas = self._get_gps()
+            true_pos = np.asarray(getattr(self.unwrapped_env, "true_p", p_meas), dtype=np.float32)
+            heading_now = self._get_heading_now()
+
+            self._hist_true_pos.append(true_pos.copy())
+
+            z, active = self.atk_manager.apply(
+                t=t,
+                gps=p_meas,
+                hist_true_pos=self._hist_true_pos,
+                hist_gps_pos=self._hist_gps_pos,
+                scenario=self.atk_scenario,
+                dt=self.dt,
+                heading_now=heading_now,
+            )
+
+            z = np.asarray(z, dtype=np.float32)
+            active = np.asarray(active, dtype=bool)
+
+            self._set_gps(z)
+            try:
+                setattr(self.unwrapped_env, "_atk_active_mask", active)
+            except Exception:
+                pass
+
+            self._hist_gps_pos.append(z.copy())
+
+            t0 = int(getattr(self.atk_scenario, "t0", t))
+            t1 = int(getattr(self.atk_scenario, "t1", t))
+            atk_type = str(getattr(self.atk_scenario, "atk_type", ""))
+
+            return {
+                "attack_t": t,
+                "attack_active": bool(np.any(active) and (t0 <= t <= t1)),
+                "attack_mask": active,
+                "attack_type": atk_type,
+                "attack_t0_t1": (t0, t1),
+            }
+
+        except Exception:
+            try:
+                setattr(self.unwrapped_env, "_atk_active_mask", np.zeros((self.N,), dtype=bool))
+            except Exception:
+                pass
+            return {}
+
+    # ========================================================
+    # Range-based weighted least-squares position proxy
+    # ========================================================
+    def _estimate_p_from_ranges(
+        self,
+        anchors: np.ndarray,
+        r: np.ndarray,
+        mask: np.ndarray,
+        sigma_r2: np.ndarray,
+        p_init: np.ndarray,
+    ) -> np.ndarray:
+        N, M = r.shape
+        p = p_init.astype(np.float32).copy()
+        A = anchors.astype(np.float32)
+
+        converged = np.zeros((N,), dtype=bool)
+
+        for _ in range(self.p_isac_iters):
+            all_done = True
+
+            for i in range(N):
+                if converged[i]:
+                    continue
+
+                mi = mask[i].astype(bool)
+                if int(mi.sum()) < self.min_anchors_for_p_isac:
+                    converged[i] = True
+                    continue
+
+                Ai = A[mi]
+                ri = r[i, mi].astype(np.float32)
+                wi = 1.0 / np.maximum(sigma_r2[i, mi].astype(np.float32), 1e-6)
+                pi = p[i].astype(np.float32)
+
+                diff = pi[None, :] - Ai
+                di = np.linalg.norm(diff, axis=1) + 1e-9
+                res = di - ri
+                J = diff / di[:, None]
+
+                WJ = wi[:, None] * J
+                H = (J.T @ WJ).astype(np.float32) + self.p_isac_lam * np.eye(3, dtype=np.float32)
+                g = (J.T @ (wi * res)).astype(np.float32)
+
+                try:
+                    dx = -np.linalg.solve(H, g).astype(np.float32)
+                except np.linalg.LinAlgError:
+                    all_done = False
+                    continue
+
+                n = float(np.linalg.norm(dx))
+                if n > self.p_isac_step_clip:
+                    dx *= self.p_isac_step_clip / (n + 1e-9)
+
+                p_new = pi + dx
+
+                diff2 = p_new[None, :] - Ai
+                di2 = np.linalg.norm(diff2, axis=1) + 1e-9
+                res2 = di2 - ri
+
+                cost0 = float(np.dot(wi * res, res))
+                cost1 = float(np.dot(wi * res2, res2))
+
+                p[i] = p_new
+
+                if n < self.p_isac_tol:
+                    converged[i] = True
+                    continue
+
+                rel_improve = abs(cost0 - cost1) / (abs(cost0) + 1e-9)
+                if rel_improve < 1e-4:
+                    converged[i] = True
+                    continue
+
+                all_done = False
+
+            if all_done:
+                break
+
+        return p.astype(np.float32)
+
+    def _build_knn(self, p_ref: np.ndarray) -> np.ndarray:
+        N = int(p_ref.shape[0])
+        k = min(self.k_neighbors, max(N - 1, 0))
+        if k <= 0:
+            return np.zeros((N, 0), dtype=np.int64)
+
+        diff = p_ref[:, None, :] - p_ref[None, :, :]
+        dist = np.linalg.norm(diff, axis=2).astype(np.float32)
+        np.fill_diagonal(dist, np.inf)
+
+        kth = max(k - 1, 0)
+        return np.argpartition(dist, kth=kth, axis=1)[:, :k].astype(np.int64)
+
+    # ========================================================
+    # Cooperative quality / redesigned neighbor / formation
+    # ========================================================
+    def _compute_isac_quality(
+        self,
+        mask: np.ndarray,
+        rho_db: np.ndarray,
+        r_isac: np.ndarray,
+        sigma_r2: np.ndarray,
+        anchors: np.ndarray,
+        p_isac: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Returns:
+          q_self:   (N,1) continuous reliability score in [0,1]
+          fit_mean: (N,1) normalized range fitting residual
+        """
+        A = anchors[None, :, :]
+        r_hat = np.linalg.norm(A - p_isac[:, None, :], axis=-1)
+
+        s_r = np.sqrt(np.maximum(sigma_r2, self.range_scale_floor ** 2)).astype(np.float32)
+        fit = np.abs(r_hat - r_isac) / s_r
+        fit *= mask
+
+        mcount = np.maximum(mask.sum(axis=1, keepdims=True), 1.0)
+        fit_mean = (fit.sum(axis=1, keepdims=True) / mcount).astype(np.float32)
+
+        # 在“4 anchor持续有效”的前提下，q_anchor通常接近1
+        q_anchor = mask.mean(axis=1, keepdims=True).astype(np.float32)
+
+        snr_mean = rho_db.mean(axis=1, keepdims=True).astype(np.float32)
+        q_snr = np.clip(
+            (snr_mean - self.quality_snr_db_lo) /
+            (self.quality_snr_db_hi - self.quality_snr_db_lo + 1e-6),
+            0.0, 1.0
+        ).astype(np.float32)
+
+        q_fit = np.exp(-0.35 * fit_mean).astype(np.float32)
+
+        q_self = np.clip(q_anchor * q_snr * q_fit, 0.0, 1.0).astype(np.float32)
+        return q_self, fit_mean
+
+    def _compute_neighbor_features(
+        self,
+        gps: np.ndarray,
+        p_isac: np.ndarray,
+        v_gps: np.ndarray,
+        v_isac: np.ndarray,
+        dp: np.ndarray,
+        h: np.ndarray,
+        q_self: np.ndarray,
+        graph_ref: np.ndarray,
+        res_sig: np.ndarray,
+    ) -> np.ndarray:
+        """
+        New 10-dim neighbor features:
+        [rel_vec_err_mean,
+         rel_vec_err_max,
+         rel_vel_err_mean,
+         rel_vel_err_max,
+         rel_bias_norm,
+         rel_bias_proj,
+         nbr_sig_l1,
+         nbr_sig_cos,
+         nbr_quality_mean,
+         nbr_rel_cusum]
+        """
+        N = int(gps.shape[0])
+
+        nbr_idx = self._build_knn(graph_ref)
+        if nbr_idx.shape[1] == 0:
+            return np.zeros((N, 10), dtype=np.float32)
+
+        q_flat = q_self.reshape(N)
+
+        rel_vec_mean = np.zeros((N, 1), dtype=np.float32)
+        rel_vec_max = np.zeros((N, 1), dtype=np.float32)
+        rel_vel_mean = np.zeros((N, 1), dtype=np.float32)
+        rel_vel_max = np.zeros((N, 1), dtype=np.float32)
+        rel_bias_norm = np.zeros((N, 1), dtype=np.float32)
+        rel_bias_proj = np.zeros((N, 1), dtype=np.float32)
+        nbr_sig_l1 = np.zeros((N, 1), dtype=np.float32)
+        nbr_sig_cos = np.zeros((N, 1), dtype=np.float32)
+        nbr_quality_mean = np.zeros((N, 1), dtype=np.float32)
+
+        for i in range(N):
+            idx = nbr_idx[i]
+            if idx.size == 0:
+                continue
+
+            good = q_flat[idx] >= self.quality_gate
+            pool = idx[good] if np.any(good) else idx
+            if pool.size == 0:
+                continue
+
+            w = q_flat[pool].astype(np.float32)
+            if float(w.sum()) < 1e-6:
+                w = np.ones_like(w, dtype=np.float32)
+            w = w / (w.sum() + 1e-6)
+
+            nbr_quality_mean[i, 0] = float(np.mean(q_flat[pool]))
+
+            # relative displacement vector inconsistency
+            disp_gps = gps[i][None, :] - gps[pool]
+            disp_isac = p_isac[i][None, :] - p_isac[pool]
+            e_vec = np.linalg.norm(disp_gps - disp_isac, axis=1)
+            e_vec = np.clip(e_vec / max(self.pos_scale, 1e-6), 0.0, 20.0)
+
+            rel_vec_mean[i, 0] = float(np.sum(w * e_vec))
+            rel_vec_max[i, 0] = float(np.max(e_vec))
+
+            # relative velocity inconsistency
+            dvg = v_gps[i][None, :] - v_gps[pool]
+            dvi = v_isac[i][None, :] - v_isac[pool]
+            e_vel = np.linalg.norm(dvg - dvi, axis=1)
+            e_vel = np.clip(e_vel / max(self.vel_scale, 1e-6), 0.0, 20.0)
+
+            rel_vel_mean[i, 0] = float(np.sum(w * e_vel))
+            rel_vel_max[i, 0] = float(np.max(e_vel))
+
+            # robust neighborhood bias reference
+            b_ref = np.median(dp[pool], axis=0).astype(np.float32)
+            rel_b = (dp[i] - b_ref).astype(np.float32)
+
+            rel_bias_norm[i, 0] = float(np.linalg.norm(rel_b))
+            rel_bias_proj[i, 0] = float(np.clip(np.dot(rel_b, h[i]), -5.0, 5.0))
+
+            # residual signature consistency
+            sig_ref = np.median(res_sig[pool], axis=0).astype(np.float32)
+            diff_sig = np.abs(res_sig[i] - sig_ref)
+
+            nbr_sig_l1[i, 0] = float(np.mean(diff_sig))
+
+            cosv = float(_cos_sim(res_sig[i][None, :], sig_ref[None, :])[0])
+            nbr_sig_cos[i, 0] = float(np.clip(1.0 - cosv, 0.0, 2.0))
+
+        # relative anomaly CUSUM on rel_vec_mean
+        if self._nbr_rel_ema is None:
+            self._nbr_rel_ema = rel_vec_mean.copy()
+        if self._nbr_rel_cusum is None:
+            self._nbr_rel_cusum = np.zeros_like(rel_vec_mean, dtype=np.float32)
+
+        nbr_delta = rel_vec_mean - self._nbr_rel_ema
+        self._nbr_rel_ema = (
+            self.nbr_ema_beta * self._nbr_rel_ema
+            + (1.0 - self.nbr_ema_beta) * rel_vec_mean
+        ).astype(np.float32)
+
+        self._nbr_rel_cusum = np.clip(
+            self._nbr_rel_cusum + np.maximum(nbr_delta - 0.5 * self.cusum_drift, 0.0),
+            0.0, 1.0,
+        ).astype(np.float32)
+
+        feats = np.concatenate(
+            [
+                rel_vec_mean,
+                rel_vec_max,
+                rel_vel_mean,
+                rel_vel_max,
+                rel_bias_norm,
+                rel_bias_proj,
+                nbr_sig_l1,
+                nbr_sig_cos,
+                nbr_quality_mean,
+                self._nbr_rel_cusum,
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        feats *= q_self.astype(np.float32)
+
+        if self._nbr_ema is None:
+            self._nbr_ema = feats.copy()
+        self._nbr_ema = (
+            self.nbr_ema_beta * self._nbr_ema
+            + (1.0 - self.nbr_ema_beta) * feats
+        ).astype(np.float32)
+
+        return self._nbr_ema.astype(np.float32)
+
+    def _compute_formation_features(
+        self,
+        gps: np.ndarray,
+        p_isac: np.ndarray,
+        q_self: np.ndarray,
+    ) -> np.ndarray:
+        """
+        New 4-dim formation features:
+        [form_consensus,
+         form_outlier_z,
+         form_delta,
+         form_cusum]
+        """
+        N = int(gps.shape[0])
+        if N <= 1:
+            return np.zeros((N, 4), dtype=np.float32)
+
+        q_flat = q_self.reshape(N)
+
+        pair_rel_vec = np.linalg.norm(
+            (gps[:, None, :] - gps[None, :, :]) -
+            (p_isac[:, None, :] - p_isac[None, :, :]),
+            axis=2
+        )
+        pair_rel_vec = np.clip(pair_rel_vec / max(self.pos_scale, 1e-6), 0.0, 20.0).astype(np.float32)
+        np.fill_diagonal(pair_rel_vec, 0.0)
+
+        form_consensus = np.zeros((N, 1), dtype=np.float32)
+
+        for i in range(N):
+            pool = np.array([j for j in range(N) if j != i], dtype=np.int64)
+            if pool.size == 0:
+                continue
+
+            good = q_flat[pool] >= self.quality_gate
+            pool = pool[good] if np.any(good) else pool
+            if pool.size == 0:
+                continue
+
+            w = q_flat[pool].astype(np.float32)
+            if float(w.sum()) < 1e-6:
+                w = np.ones_like(w, dtype=np.float32)
+            w = w / (w.sum() + 1e-6)
+
+            form_consensus[i, 0] = float(np.sum(w * pair_rel_vec[i, pool]))
+
+        good_self = q_flat >= self.quality_gate
+        if np.any(good_self):
+            med = float(np.median(form_consensus[good_self]))
+            mad = float(np.median(np.abs(form_consensus[good_self] - med)) + 1e-6)
+        else:
+            med = float(np.median(form_consensus))
+            mad = float(np.median(np.abs(form_consensus - med)) + 1e-6)
+
+        form_outlier_z = ((form_consensus - med) / (1.4826 * mad + 1e-6)).astype(np.float32)
+        form_outlier_z = np.clip(form_outlier_z, -4.0, 4.0)
+
+        if self._form_cons_ema is None:
+            self._form_cons_ema = form_consensus.copy()
+        if self._form_cusum is None:
+            self._form_cusum = np.zeros_like(form_consensus, dtype=np.float32)
+
+        form_delta = np.clip(form_consensus - self._form_cons_ema, -1.0, 1.0).astype(np.float32)
+
+        self._form_cons_ema = (
+            self.form_ema_beta * self._form_cons_ema
+            + (1.0 - self.form_ema_beta) * form_consensus
+        ).astype(np.float32)
+
+        self._form_cusum = np.clip(
+            self._form_cusum + np.maximum(form_delta - 0.5 * self.cusum_drift, 0.0),
+            0.0, 1.0,
+        ).astype(np.float32)
+
+        feats = np.concatenate(
+            [
+                form_consensus,
+                form_outlier_z,
+                form_delta,
+                self._form_cusum,
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        feats *= q_self.astype(np.float32)
+        return feats
+
+    # ========================================================
+    # Gym API
+    # ========================================================
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+        if seed is not None:
+            _ = self.base.reset(seed=seed, options=options)
+        else:
+            _ = self.base.reset(options={"goal": [100, 100, 50]})
+
+        gps0 = self._get_gps().copy()
+        self._prev_gps = gps0.copy()
+
+        self._score_hist.clear()
+        self._ema_mu = np.zeros((self.N, 1), dtype=np.float32)
+        self._cpos = np.zeros((self.N, 1), dtype=np.float32)
+        self._cneg = np.zeros((self.N, 1), dtype=np.float32)
+        self._cusum = np.zeros((self.N, 1), dtype=np.float32)
+
+        self._nbr_ema = np.zeros((self.N, 10), dtype=np.float32)
+        self._nbr_rel_ema = np.zeros((self.N, 1), dtype=np.float32)
+        self._nbr_rel_cusum = np.zeros((self.N, 1), dtype=np.float32)
+
+        self._form_cons_ema = np.zeros((self.N, 1), dtype=np.float32)
+        self._form_cusum = np.zeros((self.N, 1), dtype=np.float32)
+
+        self._pair_err_ema = None
+        self._pair_err_cusum = None
+
+        self._hist_true_pos.clear()
+        self._hist_gps_pos.clear()
+
+        self._p_isac_prev = gps0.copy()
+        self._prev_p_isac = None
+        self._graph_ref = None
+
+        if self.attack_writeback and (self.atk_manager is not None):
+            if self.resample_attack_on_reset or (self.atk_scenario is None):
+                T_max = int(getattr(self.unwrapped_env, "T_max", 0) or 1000)
+                try:
+                    self.atk_scenario = self.atk_manager.sample_scenario(T_max=T_max, dt=self.dt)
+                except Exception:
+                    self.atk_scenario = None
+
+        self._a_prev[:] = 0
+        self._y_prevprev[:] = 0
+        self._event_open[:] = False
+        self._detected_in_event[:] = False
+        self._event_t0[:] = 0
+        self._neg_hold_counter[:] = 0
+        self._last_fp_step[:] = -10**9
+
+        self._attack_info_current = self._apply_attack_writeback()
+        self._y_current = self._as_attack_mask(self._attack_info_current)
+
+        gps_att = self._get_gps().copy()
+        self._prev_gps = gps_att.copy()
+        self._p_isac_prev = gps_att.copy()
+        self._prev_p_isac = gps_att.copy()
+        self._graph_ref = gps_att.copy()
+
+        x0, info0 = self._build_obs_and_info(self._attack_info_current)
+        info0 = dict(info0)
+        info0.update(self._attack_info_current)
+        info0["note"] = "reset"
+        return x0, info0
+
+    def step(self, a_det):
+        if isinstance(a_det, dict):
+            a = a_det.get("a", None)
+            if a is None:
+                for k in ("action", "actions", "act"):
+                    if k in a_det:
+                        a = a_det[k]
+                        break
+            if a is None:
+                raise ValueError("No action found in dict")
+        else:
+            a = a_det
+
+        a = np.asarray(a, dtype=np.float32)
+        if a.ndim == 2 and a.shape[1] == 2:
+            a = a.argmax(axis=1).astype(np.int32)
+        elif a.ndim == 1:
+            a = a.astype(np.int32)
+        else:
+            raise ValueError(f"Expected action shape (N,) or (N,2), got {a.shape}")
+        a = a.reshape(self.N)
+
+        attack_info_current = dict(self._attack_info_current) if isinstance(self._attack_info_current, dict) else {}
+        y_current = self._y_current.copy()
+
+        r = self._compute_detection_reward(a, y_current, attack_info_current)
+
+        if callable(self.nav_stepper):
+            base_action = self.nav_stepper(self.unwrapped_env)
+        else:
+            base_action = np.zeros((self.N, 2), dtype=np.float32)
+
+        step_ret = self.unwrapped_env.step(base_action)
+        if isinstance(step_ret, (list, tuple)) and len(step_ret) == 5:
+            _, _, terminated, truncated, info_base = step_ret
+        elif isinstance(step_ret, (list, tuple)) and len(step_ret) == 4:
+            _, _, done, info_base = step_ret
+            terminated, truncated = bool(done), False
+        else:
+            raise RuntimeError("Unexpected base env step return format")
+
+        self._attack_info_current = self._apply_attack_writeback()
+        self._y_current = self._as_attack_mask(self._attack_info_current)
+
+        x_next, info_next = self._build_obs_and_info(self._attack_info_current)
+
+        info = {}
+        if isinstance(attack_info_current, dict):
+            info.update(attack_info_current)
+        if isinstance(info_base, dict):
+            info.update(info_base)
+        if isinstance(info_next, dict):
+            info.update(info_next)
+
+        tp = ((a == 1) & (y_current == 1))
+        fp = ((a == 1) & (y_current == 0))
+        fn = ((a == 0) & (y_current == 1))
+        tn = ((a == 0) & (y_current == 0))
+        info["det_tp_fp_fn_tn"] = (int(tp.sum()), int(fp.sum()), int(fn.sum()), int(tn.sum()))
+
+        info["attack_mask_next"] = self._attack_info_current.get("attack_mask", np.zeros((self.N,), dtype=bool))
+        info["attack_active_next"] = self._attack_info_current.get("attack_active", False)
+        info["attack_t_next"] = self._attack_info_current.get("attack_t", None)
+        return x_next, r.astype(np.float32), bool(terminated), bool(truncated), info
+
+    # ========================================================
+    # Observation builder
+    # ========================================================
+    def _build_obs_and_info(self, attack_info_current: dict) -> Tuple[np.ndarray, Dict[str, Any]]:
+        gps = self._get_gps()
+
+        true_p = np.asarray(getattr(self.unwrapped_env, "true_p", gps), dtype=np.float32)
+        h = self._get_heading_now().astype(np.float32)
+        v_model = (self.v0 * h).astype(np.float32)
+
+        isac = self.isac_gen.measure(true_p=true_p, h=h, v0=self.v0)
+        r_isac = isac["r"]
+        u_isac = isac["u"]
+        d_isac = isac["dop"]
+        mask = isac["mask"]
+        rho = isac["rho"]
+        rho_db = isac["rho_db"]
+        sigma_r2 = isac["sigma_r2"]
+        sigma_d2 = isac["sigma_d2"]
+        sigma_u2 = isac["sigma_u2"]
+        anchors = isac["anchors"]
+
+        # GPS-derived range / direction / Doppler
+        A = anchors[None, :, :]
+        P = gps[:, None, :]
+        dvec_gps = A - P
+
+        r_gps = np.linalg.norm(dvec_gps, axis=-1)
+        u_gps = _unit(dvec_gps)
+        d_gps = np.sum(v_model[:, None, :] * u_gps, axis=-1)
+
+        s_r = np.sqrt(np.maximum(sigma_r2, self.range_scale_floor ** 2)).astype(np.float32)
+        s_d = np.sqrt(np.maximum(sigma_d2, self.doppler_scale_floor ** 2)).astype(np.float32)
+
+        dr = (r_isac - r_gps) / s_r
+        dd = (d_isac - d_gps) / s_d
+        dir_err = 1.0 - _cos_sim(u_isac, u_gps)
+
+        dr *= mask
+        dd *= mask
+        dir_err *= mask
+
+        mcount = np.maximum(mask.sum(axis=1, keepdims=True), 1.0)
+
+        abs_dr = np.abs(dr)
+        abs_dd = np.abs(dd)
+
+        f_dr_mean = abs_dr.sum(axis=1, keepdims=True) / mcount
+        f_dr_max = abs_dr.max(axis=1, keepdims=True)
+
+        f_dd_mean = abs_dd.sum(axis=1, keepdims=True) / mcount
+        f_dd_max = abs_dd.max(axis=1, keepdims=True)
+
+        f_dir_mean = dir_err.sum(axis=1, keepdims=True) / mcount
+        f_dir_max = dir_err.max(axis=1, keepdims=True)
+
+        meas_ratio = mask.mean(axis=1, keepdims=True)
+        mask_min = mask.min(axis=1, keepdims=True)
+
+        score = 0.4 * f_dr_mean + 0.2 * f_dd_mean + 0.2 * f_dir_mean + 0.2 * (f_dr_max + f_dd_max + f_dir_max) / 3.0
+        self._score_hist.append(score.copy())
+
+        if len(self._score_hist) >= 2:
+            change = self._score_hist[-1] - self._score_hist[-2]
+        else:
+            change = np.zeros_like(score)
+
+        if len(self._score_hist) >= 3:
+            accel = self._score_hist[-1] - 2.0 * self._score_hist[-2] + self._score_hist[-3]
+            hist = np.concatenate(list(self._score_hist), axis=1)
+            std = np.std(hist, axis=1, keepdims=True).astype(np.float32)
+            trend = (hist[:, -1:] - hist[:, :1]).astype(np.float32)
+        else:
+            accel = np.zeros_like(score)
+            std = np.zeros_like(score)
+            trend = np.zeros_like(score)
+
+        score_delta = (self.score_delta_mix * change + (1.0 - self.score_delta_mix) * accel).astype(np.float32)
+        score_std = (self.score_std_mix * std + (1.0 - self.score_std_mix) * np.abs(trend)).astype(np.float32)
+
+        if self._ema_mu is None:
+            self._ema_mu = np.zeros((self.N, 1), dtype=np.float32)
+        if self._cpos is None:
+            self._cpos = np.zeros((self.N, 1), dtype=np.float32)
+        if self._cneg is None:
+            self._cneg = np.zeros((self.N, 1), dtype=np.float32)
+        if self._cusum is None:
+            self._cusum = np.zeros((self.N, 1), dtype=np.float32)
+
+        self._ema_mu = self.cusum_beta * self._ema_mu + (1.0 - self.cusum_beta) * score
+        e = score - self._ema_mu
+
+        self._cpos = np.clip(self._cpos + e - self.cusum_drift, 0.0, self.cusum_max)
+        self._cneg = np.clip(self._cneg - e - self.cusum_drift, 0.0, self.cusum_max)
+        self._cusum = np.maximum(self._cpos, self._cneg)
+        cus = self._cusum / max(self.cusum_max, 1e-6)
+
+        # 12 local features
+        x_isac12 = np.concatenate(
+            [
+                f_dr_mean, f_dr_max,
+                f_dd_mean, f_dd_max,
+                f_dir_mean, f_dir_max,
+                meas_ratio,
+                score,
+                cus,
+                score_delta,
+                score_std,
+                mask_min,
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        # ISAC-based position proxy from weighted least squares on range
+        if self._p_isac_prev is None:
+            self._p_isac_prev = gps.copy()
+
+        p_isac = self._estimate_p_from_ranges(
+            anchors=anchors,
+            r=r_isac,
+            mask=mask,
+            sigma_r2=sigma_r2,
+            p_init=self._p_isac_prev,
+        )
+        self._p_isac_prev = p_isac.copy()
+
+        # self features
+        dp = (gps - p_isac) / max(self.pos_scale, 1e-6)
+        dp_norm = np.linalg.norm(dp, axis=1, keepdims=True)
+        dp_proj = np.sum(dp * h, axis=1, keepdims=True).astype(np.float32)
+        dp_proj = np.clip(dp_proj, -5.0, 5.0).astype(np.float32)
+        x_self2 = np.concatenate([dp_norm, dp_proj], axis=1).astype(np.float32)
+
+        # cooperative quality
+        q_self, fit_mean = self._compute_isac_quality(
+            mask=mask,
+            rho_db=rho_db,
+            r_isac=r_isac,
+            sigma_r2=sigma_r2,
+            anchors=anchors,
+            p_isac=p_isac,
+        )
+
+        # velocity proxies
+        if self._prev_gps is None:
+            self._prev_gps = gps.copy()
+        if self._prev_p_isac is None:
+            self._prev_p_isac = p_isac.copy()
+
+        v_gps = ((gps - self._prev_gps) / max(self.dt, 1e-6)).astype(np.float32)
+        v_isac = ((p_isac - self._prev_p_isac) / max(self.dt, 1e-6)).astype(np.float32)
+
+        # stable graph reference
+        if self._graph_ref is None:
+            self._graph_ref = p_isac.copy()
+        else:
+            self._graph_ref = (
+                self.graph_ema_beta * self._graph_ref
+                + (1.0 - self.graph_ema_beta) * p_isac
+            ).astype(np.float32)
+
+        # residual signature
+        res_sig = np.concatenate(
+            [
+                np.clip(abs_dr, 0.0, 5.0),
+                np.clip(abs_dd, 0.0, 5.0),
+                np.clip(dir_err, 0.0, 1.0),
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        # redesigned neighbor / formation
+        neighbor_features = self._compute_neighbor_features(
+            gps=gps,
+            p_isac=p_isac,
+            v_gps=v_gps,
+            v_isac=v_isac,
+            dp=dp,
+            h=h,
+            q_self=q_self,
+            graph_ref=self._graph_ref,
+            res_sig=res_sig,
+        )
+
+        formation_features = self._compute_formation_features(
+            gps=gps,
+            p_isac=p_isac,
+            q_self=q_self,
+        )
+
+        x = np.concatenate(
+            [x_isac12, x_self2, neighbor_features, formation_features],
+            axis=1
+        ).astype(np.float32)
+        # x = np.concatenate([x_isac12,x_self2,formation_features],axis=1).astype(np.float32)
+
+        if np.any(np.isnan(x)) or np.any(np.isinf(x)):
+            x = np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0).astype(np.float32)
+
+        self._prev_gps = gps.copy()
+        self._prev_p_isac = p_isac.copy()
+
+        info = {
+            "isac_M": int(self.M),
+            "isac_meas_ratio_mean": float(meas_ratio.mean()),
+            "isac_score_mean": float(score.mean()),
+            "isac_cusum_mean": float(cus.mean()),
+            "isac_rho_mean": float(rho.mean()),
+            "isac_rho_db_mean": float(rho_db.mean()),
+            "isac_sigma_r2_mean": float(sigma_r2.mean()),
+            "isac_sigma_d2_mean": float(sigma_d2.mean()),
+            "isac_sigma_u2_mean": float(sigma_u2.mean()),
+            "isac_quality_mean": float(q_self.mean()),
+            "isac_fit_mean": float(fit_mean.mean()),
+            "obs_mode": "full_isac_28d_redesign",
+        }
+        return x, info
+
+    # ========================================================
+    # Reward
+    # ========================================================
+    def _compute_detection_reward(self, a: np.ndarray, y: np.ndarray, info: dict) -> np.ndarray:
+        a = np.asarray(a, dtype=np.int32).reshape(self.N)
+        y = np.asarray(y, dtype=np.int32).reshape(self.N)
+
+        R = np.zeros((self.N,), dtype=np.float32)
+
+        rise_true = (self._y_prevprev == 0) & (y == 1)
+        fall_true = (self._y_prevprev == 1) & (y == 0)
+        rise_pred = (self._a_prev == 0) & (a == 1)
+        fall_pred = (self._a_prev == 1) & (a == 0)
+
+        current_t = int(getattr(self.unwrapped_env, "t", 0))
+
+        if np.any(rise_true):
+            self._event_open[rise_true] = True
+            self._detected_in_event[rise_true] = False
+            t0_info = int(info.get("attack_t0_t1", (current_t, current_t))[0])
+            self._event_t0[rise_true] = t0_info
+
+        first_hit = (y == 1) & (a == 1) & (~self._detected_in_event)
+        if np.any(first_hit):
+            elapsed_steps = np.maximum(0, current_t - self._event_t0[first_hit])
+            Td_steps = max(1, int(round(self.delay_full_seconds / max(self.dt, 1e-9))))
+            delay_weight = np.exp(
+                -self.delay_k * np.clip(elapsed_steps, 0, Td_steps) / float(Td_steps)
+            ).astype(np.float32)
+            R[first_hit] += self.R_TP * delay_weight
+            self._detected_in_event[first_hit] = True
+
+        stay = (y == 1) & (a == 1)
+        if np.any(stay):
+            R[stay] += self.stay_reward
+
+        tn = (y == 0) & (a == 0)
+        if np.any(tn):
+            R[tn] += self.R_TN
+
+        fp_edge = rise_pred & (y == 0)
+        if np.any(fp_edge):
+            idx = np.where(fp_edge)[0]
+            cooldown_ok = (current_t - self._last_fp_step[idx]) >= self.fp_cooldown_steps
+            penalize_idx = idx[cooldown_ok]
+            if penalize_idx.size > 0:
+                R[penalize_idx] -= self.R_FP
+                self._last_fp_step[penalize_idx] = current_t
+
+        hold_neg = (y == 0) & (a == 1) & (~rise_pred)
+        self._neg_hold_counter[hold_neg] += 1
+        self._neg_hold_counter[~hold_neg] = 0
+
+        if self.use_cusum_in_reward and (self._cusum is not None):
+            cus_norm = np.asarray(self._cusum).reshape(-1) / max(self.cusum_max, 1e-6)
+            waive = (self._neg_hold_counter <= self.neg_hold_grace_steps) | (
+                cus_norm >= self.cusum_waive_threshold
+            )
+            apply_cost = hold_neg & (~waive)
+        else:
+            apply_cost = hold_neg & (self._neg_hold_counter > self.neg_hold_grace_steps)
+
+        if np.any(apply_cost):
+            R[apply_cost] -= self.hold_cost
+
+        miss = (y == 1) & (a == 0)
+        if np.any(miss):
+            R[miss] -= self.fn_step_penalty
+
+        miss_event = fall_true & self._event_open & (~self._detected_in_event)
+        if np.any(miss_event):
+            R[miss_event] -= self.R_FN
+
+        if np.any(fall_true):
+            self._event_open[fall_true] = False
+            self._detected_in_event[fall_true] = False
+
+        if self.hysteresis_penalty > 0.0:
+            if self.use_cusum_in_reward and (self._cusum is not None):
+                cus_norm = np.asarray(self._cusum).reshape(-1) / max(self.cusum_max, 1e-6)
+                bad_off = fall_pred & (cus_norm >= self.cusum_waive_threshold)
+            else:
+                bad_off = fall_pred & (y == 1)
+            if np.any(bad_off):
+                R[bad_off] -= self.hysteresis_penalty
+
+        if self.flip_penalty > 0.0:
+            R -= self.flip_penalty * (a != self._a_prev).astype(np.float32)
+
+        self._a_prev = a.copy()
+        self._y_prevprev = y.copy()
+        return R.astype(np.float32)
+
+    # ========================================================
+    # Feature names
+    # ========================================================
+    def get_feature_names(self):
+        isac_names = [
+            "abs_dr_mean",
+            "abs_dr_max",
+            "abs_dd_mean",
+            "abs_dd_max",
+            "dir_err_mean",
+            "dir_err_max",
+            "meas_ratio",
+            "score",
+            "cusum",
+            "score_delta",
+            "score_std",
+            "mask_min",
+        ]
+        self_names = [
+            "dp_norm",
+            "dp_proj",
+        ]
+        neighbor_names = [
+            "rel_vec_err_mean",
+            "rel_vec_err_max",
+            "rel_vel_err_mean",
+            "rel_vel_err_max",
+            "rel_bias_norm",
+            "rel_bias_proj",
+            "nbr_sig_l1",
+            "nbr_sig_cos",
+            "nbr_quality_mean",
+            "nbr_rel_cusum",
+        ]
+        formation_names = [
+            "form_consensus",
+            "form_outlier_z",
+            "form_delta",
+            "form_cusum",
+        ]
+        return isac_names + self_names + neighbor_names + formation_names
+        # return isac_names + self_names+formation_names

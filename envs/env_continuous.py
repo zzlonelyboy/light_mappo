@@ -39,8 +39,8 @@ class ContinuousActionEnv(object):
             infos_list,                   # list(dict)
         )
 
-    def reset(self):
-        obs_list = self.env.reset()
+    def reset(self,options: Optional[dict] = None):
+        obs_list = self.env.reset(options)
         return np.stack(obs_list)         # -> (N, obs_dim)
 
     def close(self):

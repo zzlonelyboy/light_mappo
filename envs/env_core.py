@@ -5,7 +5,9 @@ import gym
 import numpy as np
 from typing import List, Any, Dict, Optional, Callable
 from gym import spaces
-from envs.stage2DetectEnv import Stage2DetectEnv
+
+from envs.stage2DetectEnvISAC5 import Stage2ISACDetectEnv
+# from envs.stage2DetectEnv import Stage2DetectEnv
 # 改成你实际的导入路径
 from envs.MultiUAVSphereEnv import MultiUAVSphereEnv
 from envs.MultiUAVSphereEnv2 import MultiUAVSphereEnvWithObstacle
@@ -31,21 +33,136 @@ class EnvCore(object):
             atk_scenario: Optional[Any] = None,
             attack_writeback: bool = False,
             # 奖励超参
-            reward_tp: float = 1.0,
-            reward_fp: float = 1.8,
-            reward_fn: float = 3.5,
-            flip_penalty: float = 0.01,
-            delay_full_seconds: float = 3.0,
+            # reward_tp: float = 100.0,      #
+            # reward_fp: float = 8,      #
+            # reward_fn: float = 40.0,     #
+            # reward_tn: float =0.1,
+            # # reward_fn:float=25,
+            # stay_reward:float =2,
+            # flip_penalty: float = 0.02,
+            # delay_full_seconds: float = 2.0,
+
+            #run9
+            # reward_tp = 60,
+            # reward_fp = 15,
+            # reward_fn = 25,
+            # reward_tn = 0.5,
+            # stay_reward = 0.8,
+            # flip_penalty = 0.03,
+            # delay_full_seconds: float = 2.0,
+
+            #run10
+            # reward_tp = 75.0,
+            # reward_fp = 30.0,
+            # reward_fn = 25.0,
+            # reward_tn = 0.8,
+            # stay_reward = 0.3,
+            # flip_penalty = 0.06,
+            # delay_full_seconds = 2.0,
+
+
+            # 2026/5/12 17:28之前
+            # reward_tp=100.0,
+            # reward_fp=5.0,
+            # reward_fn=40.0,
+            # reward_tn=0.5,
+            # stay_reward=1,
+            # flip_penalty=0.06,
+            # delay_full_seconds=2.0,
+            #20260514 10:00调整，强化漏报惩罚，降低误报惩罚，增加持续正确报警奖励
+            # reward_tp=50.0,          # 首次检测奖励 R_TP
+            # reward_fp=4.0,           # 每步误报惩罚 R_FP
+            # reward_fn=0.0,           # 简化版中不再使用 R_FN，可保留但设为 0
+            # reward_tn=0.5,           # 正常静默奖励 R_TN
+            # stay_reward=2.0,         # 攻击期间持续正确报警奖励
+            # flip_penalty=0.0,        # 简化版不使用
+            # delay_full_seconds=2.0,  # 延迟奖励衰减窗口
+            # fn_step_penalty=0.25,    # 每步漏检惩罚
+
+            reward_tp=20.0,          # 首次检测奖励 R_TP
+            reward_fp=2,           # 每步误报惩罚 R_FP
+            reward_fn=0.0,           # 简化版中不再使用 R_FN，可保留但设为 0
+            reward_tn=0.5,           # 正常静默奖励 R_TN
+            stay_reward=1.5,         # 攻击期间持续正确报警奖励
+            flip_penalty=0.0,        # 简化版不使用
+            delay_full_seconds=2.0,  # 延迟奖励衰减窗口
+            fn_step_penalty=4,    # 每步漏检惩罚
+
+            # reward_tp: float = 90.0,  #
+            # reward_fp: float = 6,  #
+            # reward_fn: float = 50.0,  #
+            # reward_tn: float = 0.5,
+            # # reward_fn:float=25,
+            # stay_reward: float = 3,
+            # flip_penalty: float = 0.02,
+            # delay_full_seconds: float = 2.0,
+
+            # reward_tp: float = 100.0,      #
+            # reward_fp: float = 4,      #
+            # reward_fn: float = 50.0,     #
+            # reward_tn: float =1,
+            # # reward_fn:float=25,
+            # stay_reward:float =6,
+            # flip_penalty: float = 0.02,
+            # delay_full_seconds: float = 2.0,
+            # reward_tp=50.0,
+            # reward_fn = 50.0,
+            # reward_fp = 5.0,
+            # reward_tn = 0.0,
+            # stay_reward=0.2,
+            # hold_cost = 1,
+            #
+            # neg_hold_grace_steps = 3,
+            # fp_cooldown_steps = 3,
+            # flip_penalty = 0.01,
+            # delay_weight_min=0.3,
+            # delay_k = 0.6,
+            # alarm_step_cost = 0.1
+
+            # reward_tp=50.0,
+            # reward_fn = 80.0,  # 稍微加大，强化不漏报
+            # reward_fp = 2.0,
+            # reward_tn = 0.0,
+
+            # stay_reward = 0.4,
+            # hold_cost = 1.2,
+            # neg_hold_grace_steps = 3,
+            # fp_cooldown_steps = 3,
+            # flip_penalty = 0.01,
+            #
+            # delay_weight_min = 0.5,
+            # delay_k = 0.35,
+            #
+            # alarm_step_cost = 0.08,  # 关键：先把攻击期磨损降下来
+            # miss_step_cost=0.1
     ):
         # 基本元数据
-        self._env = Stage2DetectEnv(base_env=base_env,nav_adapter=nav_adapter,
-                                    gps_getter=gps_getter,atk_manager=atk_manager,
-                                    atk_scenario=atk_scenario,attack_writeback=attack_writeback,
-                                    reward_tp=reward_tp,reward_fp=reward_fp,reward_fn=reward_fn,
-                                    flip_penalty=flip_penalty,delay_full_seconds=delay_full_seconds)
+        # self._env = Stage2DetectEnv(base_env=base_env,nav_adapter=nav_adapter,
+        #                             gps_getter=gps_getter,atk_manager=atk_manager,
+        #                             atk_scenario=atk_scenario,attack_writeback=attack_writeback,
+        #                             reward_tp=reward_tp,reward_fp=reward_fp,reward_fn=reward_fn,stay_reward=stay_reward,reward_tn=reward_tn,
+        #                             flip_penalty=flip_penalty,delay_full_seconds=delay_full_seconds)
+        # self._env=Stage2DetectEnvAblation(base_env=base_env,nav_adapter=nav_adapter,
+        #                             gps_getter=gps_getter,atk_manager=atk_manager,
+        #                             atk_scenario=atk_scenario,attack_writeback=attack_writeback,
+        #                             reward_tp=reward_tp,reward_fp=reward_fp,reward_fn=reward_fn,stay_reward=stay_reward,reward_tn=reward_tn,
+        #                             flip_penalty=flip_penalty,delay_full_seconds=delay_full_seconds)
+        self._env = Stage2ISACDetectEnv(base_env=base_env, nav_stepper=nav_adapter,
+                                            gps_getter=gps_getter, atk_manager=atk_manager,
+                                            atk_scenario=atk_scenario, attack_writeback=attack_writeback,
+                                            reward_tp=reward_tp, reward_fp=reward_fp,
+                                            stay_reward=stay_reward, reward_tn=reward_tn,
+                                            delay_full_seconds=delay_full_seconds,fn_step_penalty=fn_step_penalty)
+        # self._env = Stage2ISACDetectEnv(base_env=base_env, nav_stepper=nav_adapter,
+        #                                     gps_getter=gps_getter, atk_manager=atk_manager,
+        #                                     atk_scenario=atk_scenario, attack_writeback=attack_writeback,
+        #                                     reward_tp=reward_tp, reward_fp=reward_fp, reward_fn=reward_fn,
+        #                                     stay_reward=stay_reward, reward_tn=reward_tn,
+        #                                     flip_penalty=flip_penalty, hold_cost=hold_cost,neg_hold_grace_steps=neg_hold_grace_steps,fp_cooldown_steps=fp_cooldown_steps,
+        #                                     delay_weight_min=delay_weight_min,delay_k=delay_k,alarm_step_cost=alarm_step_cost,miss_step_cost=miss_step_cost)
         self.agent_num: int = self._env.N
         self.action_dim: int = 2  # 【0,1】表示判断是否收到攻击
-        self.obs_dim: int = self._env.det_dim
+        self.obs_dim: int = self._env.obs_dim
         self.observation_space=[spaces.Box(low=-np.inf,high=np.inf,shape=(self.obs_dim,),dtype=np.float32)
                                 for _ in range(self.agent_num)]
         self.action_space=(spaces.Discrete(self.action_dim) for _ in range(self.agent_num))
@@ -75,8 +192,35 @@ class EnvCore(object):
         sub_agent_info = [{} for _ in range(self.agent_num)]
         if "term_reason" in info:
             sub_agent_info[0]["term_reason"] = info["term_reason"]
-        if 'det_tp_fp_fn' in info:
-            sub_agent_info[0]['det_tp_fp_fn']=info['det_tp_fp_fn']
-
+        if 'det_tp_fp_fn_tn' in info:
+            sub_agent_info[0]['det_tp_fp_fn_tn']=info['det_tp_fp_fn_tn']
+        for key in (
+            "det_event_started",
+            "det_event_detected",
+            "det_event_missed",
+            "det_event_open",
+            "det_delay_steps",
+            "det_delay_seconds",
+            "det_delay_mean_steps",
+            "det_delay_mean_seconds",
+            "attack_active",
+            "attack_mask",
+            "attack_type",
+            "residual_mean",
+            "residual_max",
+            "residual_change",
+            "residual_change_rate",
+            "residual_window_std",
+            "residual_window_drift",
+            "residual_ema_error",
+            "residual_cusum",
+            "residual_dr",
+            "residual_dd",
+            "residual_dir_err",
+            "residual_mask",
+            "pair_geo_mean",
+            "pair_geo_max",
+        ):
+            if key in info:
+                sub_agent_info[0][key] = info[key]
         return [sub_agent_obs, sub_agent_reward, sub_agent_done, sub_agent_info]
-

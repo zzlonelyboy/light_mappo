@@ -14,12 +14,16 @@ import numpy as np
 from pathlib import Path
 import torch
 
+from envs.env_discrete import DiscreteActionEnv
+
 # Get the parent directory of the current file
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
-
+# print(parent_dir)
 # Append the parent directory to sys.path, otherwise the following import will fail
 sys.path.append(parent_dir)
-
+# print(sys.path)
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] ='0'
 from config import get_config
 from envs.env_wrappers import DummyVecEnv
 
@@ -38,7 +42,7 @@ def make_train_env(all_args):
 
             from envs.env_discrete import DiscreteActionEnv
 
-            env = DiscreteActionEnv()
+            env = DiscreteActionEnv(seed=all_args.seed + rank * 1000)
 
             # env.seed(all_args.seed + rank * 1000)
             return env
@@ -53,11 +57,11 @@ def make_eval_env(all_args):
         def init_env():
             # TODO 注意注意，这里选择连续还是离散可以选择注释上面两行，或者下面两行。
             # TODO Important, here you can choose continuous or discrete action space by uncommenting the above two lines or the below two lines.
-            from envs.env_continuous import ContinuousActionEnv
+            # from envs.env_continuous import ContinuousActionEnv
 
-            env = ContinuousActionEnv()
+            # env = ContinuousActionEnv()
             # from envs.env_discrete import DiscreteActionEnv
-            # env = DiscreteActionEnv()
+            env = DiscreteActionEnv()
             env.seed(all_args.seed + rank * 1000)
             return env
 
@@ -79,13 +83,18 @@ def parse_args(args, parser):
 def main(args):
     parser = get_config()
     all_args = parse_args(args, parser)
-
+    all_args.critic_lr=1e-4
+    all_args.lr=5e-5
+    all_args.weight_decay=1e-4
     if all_args.algorithm_name == "rmappo":
         assert all_args.use_recurrent_policy or all_args.use_naive_recurrent_policy, "check recurrent policy!"
     elif all_args.algorithm_name == "mappo":
         assert (
             all_args.use_recurrent_policy == False and all_args.use_naive_recurrent_policy == False
         ), "check recurrent policy!"
+    elif all_args.algorithm_name == "maddpg":
+        # MADDPG can work with both recurrent and non-recurrent policies
+        pass
     else:
         raise NotImplementedError
 
@@ -93,6 +102,7 @@ def main(args):
         all_args.share_policy == True and all_args.scenario_name == "simple_speaker_listener"
     ) == False, "The simple_speaker_listener scenario can not use shared policy. Please check the config.py."
 
+    # print("cuda:",torch.cuda.is_available())
     # cuda
     if all_args.cuda and torch.cuda.is_available():
         print("choose to use gpu...")
@@ -163,7 +173,9 @@ def main(args):
     }
 
     # run experiments
-    if all_args.share_policy:
+    if all_args.algorithm_name == 'maddpg':
+        from runner.shared.maddpg_env_runner import MADDPGEnvRunner as Runner
+    elif all_args.share_policy:
         from runner.shared.env_runner import EnvRunner as Runner
     else:
         from runner.separated.env_runner import EnvRunner as Runner

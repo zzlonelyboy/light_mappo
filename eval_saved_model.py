@@ -244,7 +244,7 @@ def add_eval_args(parser):
         "--saved_model_dir",
         type=str,
         required=False,
-        default="D:\\Reproduction_of_the_paper\\light_mappo\\results\\MyEnv\\MyEnv\\mappo\\check\\run2\\models",
+        default="/home/zz/project_Uavs_gps_spoofing_detect/light_mappo/results/MyEnv/MyEnv/mappo/check/run13/models",
         help="包含 actor_agent*.pt / critic_agent*.pt 的目录",
     )
     parser.add_argument("--n_eval_episodes", type=int, default=2000)
