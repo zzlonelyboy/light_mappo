@@ -1,4 +1,4 @@
-"""
+﻿"""
 # @Time    : 2021/7/1 7:15 下午
 # @Author  : hezhiqiang01
 # @Email   : hezhiqiang01@baidu.com
@@ -132,7 +132,7 @@ class EnvRunner(Runner):
     def __init__(self, config):
         super(EnvRunner, self).__init__(config)
         # 为Stage2Env初始化检测指标跟踪器
-        if self.env_name == 'Stage2Env'  or self.env_name=="Stage2EnvISAC" or self.env_name=="stage2DetectEnvISAC" or self.env_name=="stage2DetectEnvISAC3" or self.env_name=="stage2DetectEnvISAC4" or self.env_name=="stage2DetectEnvISAC5" or self.env_name=="stage2DetectEnvISAC6":
+        if self.env_name == 'Stage2Env'  or self.env_name=="Stage2EnvISAC" or self.env_name=="stage2DetectEnvISAC" or self.env_name=="stage2DetectEnvISAC3" or self.env_name=="stage2DetectEnvISAC4" or self.env_name=="stage2DetectEnvISAC5" or self.env_name=="stage2DetectEnvISAC6" or self.env_name=="stage2DetectEnvISAC52tanh":
             self.det_metrics = DetectionMetrics(window_size=100)
             self.det_delay_metrics = DetectionDelayMetrics(window_size=100)
 
@@ -222,6 +222,9 @@ class EnvRunner(Runner):
             # save model
             if episode % self.save_interval == 0 or episode == episodes - 1:
                 self.save()
+            current_episode = episode + 1
+            if current_episode % 500 == 0:
+                self.save_episode_checkpoint(current_episode)
 
             # log information
             if episode % self.log_interval == 0:

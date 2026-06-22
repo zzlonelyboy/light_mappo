@@ -26,7 +26,8 @@ def add_eval_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--saved_model_dir",
         type=str,
-        default="results/stage2DetectEnvISAC6/MyEnv/mappo/check/run3/models",
+        default="results\stage2DetectEnvISAC6\MyEnv\\rmappo\Relucheck\check\\run2\models\episode_2000",
+        # default="results/stage2DetectEnvISAC6/MyEnv/mappo/check/run3/models",
         # default="results/stage2DetectEnvISAC5/MyEnv/mappo/check/run2/models",
         # required=True,
         help="Directory containing shared-policy actor.pt and critic.pt.",
@@ -416,7 +417,7 @@ def main() -> None:
 
     bootstrap_envs = make_eval_env(args.seed_start)
     # run_dir = Path("./results/test/full_shared_k_7_stealth")
-    run_dir = Path("./results/test2/local_shared_3_bak2")
+    run_dir = Path("./results/testNewNbr/local_shared_3")
     run_dir.mkdir(parents=True, exist_ok=True)
     runner = Runner(
         {

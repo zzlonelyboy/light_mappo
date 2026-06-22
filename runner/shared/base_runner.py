@@ -1,4 +1,4 @@
-import os
+﻿import os
 import numpy as np
 import torch
 from tensorboardX import SummaryWriter
@@ -125,6 +125,14 @@ class Runner(object):
         policy_critic = self.trainer.policy.critic
         torch.save(policy_critic.state_dict(), str(self.save_dir) + "/critic.pt")
 
+    def save_episode_checkpoint(self, episode):
+        """Save policy networks under a numbered episode checkpoint directory."""
+        checkpoint_dir = os.path.join(str(self.save_dir), f"episode_{int(episode)}")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        policy_actor = self.trainer.policy.actor
+        torch.save(policy_actor.state_dict(), os.path.join(checkpoint_dir, "actor.pt"))
+        policy_critic = self.trainer.policy.critic
+        torch.save(policy_critic.state_dict(), os.path.join(checkpoint_dir, "critic.pt"))
     def restore(self):
         """Restore policy's networks from a saved model."""
         policy_actor_state_dict = torch.load(str(self.model_dir) + '/actor.pt')

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, Tuple, Optional
@@ -27,23 +27,6 @@ def _unit_rows(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     return v / n
 
 
-def _pull_hold_curve(progress: float, pull_ratio: float = 0.65) -> float:
-    """
-    progress in [0,1]
-    First pull_ratio: smooth pull-off
-    Remaining: hold near 1
-    """
-    s = float(np.clip(progress, 0.0, 1.0))
-    pr = float(np.clip(pull_ratio, 0.2, 0.95))
-
-    if s <= pr:
-        x = s / pr
-        # smoothstep
-        return x * x * (3.0 - 2.0 * x)
-    else:
-        return 1.0
-
-
 def make_attack_injector(config=None):
     if config is None:
         exit("error_attack_config")
@@ -63,12 +46,6 @@ def make_attack_injector(config=None):
         stealth_rate=config["stealth_rate"],
         replay_delay_range=(config["replay_delay_lo"], config["replay_delay_hi"]),
         p_global=config.get("p_global", False),
-
-        # new params
-        replay_jitter_seconds=config.get("replay_jitter_seconds", 0.15),
-        stealth_dir_jitter=config.get("stealth_dir_jitter", 0.10),
-        use_heading_as_main_dir=config.get("use_heading_as_main_dir", True),
-        stealth_pull_ratio=config.get("stealth_pull_ratio", 0.65),
     )
     return atk_mgr, atk_types
 
@@ -86,12 +63,9 @@ class GPSAttackScenario:
     # replay frozen params
     replay_delay_steps: Optional[np.ndarray] = None         # (N,) int
     global_replay_delay_steps: Optional[int] = None         # scalar
-    replay_delay_jitter_steps: Optional[np.ndarray] = None  # (N,) int
 
     # stealth frozen params
     stealth_dir: Optional[np.ndarray] = None                # (N,D)
-    global_stealth_dir: Optional[np.ndarray] = None         # (D,)
-    stealth_pull_ratio: Optional[float] = None             # scalar
 
     # bookkeeping
     _dt_cached: Optional[float] = None
@@ -102,10 +76,10 @@ class GPSAttackScenario:
 # ============================================================
 class GPSAttackManager:
     """
-    Refactor goals:
-      1) replay = global delay + per-node small jitter
-      2) stealth = global main direction + per-node small jitter
-      3) stealth uses pull_hold curve
+    Attack models follow the paper formulation:
+      1) random: true position plus Gaussian bias
+      2) replay: delayed historical true/GPS-valid trajectory
+      3) stealth: fixed drift direction with bounded linear growth
     """
 
     def __init__(
@@ -121,12 +95,6 @@ class GPSAttackManager:
         stealth_rate: float = 1.2,
         replay_delay_range: Tuple[float, float] = (1.0, 5.0),
         p_global: bool = False,
-
-        # new params
-        replay_jitter_seconds: float = 0.15,
-        stealth_dir_jitter: float = 0.10,
-        use_heading_as_main_dir: bool = True,
-        stealth_pull_ratio: float = 0.65,
     ) -> None:
         self.rng = rng
         self.N = int(N)
@@ -138,11 +106,6 @@ class GPSAttackManager:
             random_sigma=float(random_sigma),
             stealth_rate=float(stealth_rate),
             replay_delay_range=(float(replay_delay_range[0]), float(replay_delay_range[1])),
-
-            replay_jitter_seconds=float(replay_jitter_seconds),
-            stealth_dir_jitter=float(stealth_dir_jitter),
-            use_heading_as_main_dir=bool(use_heading_as_main_dir),
-            stealth_pull_ratio=float(stealth_pull_ratio),
         )
         self.p_global = bool(p_global)
 
@@ -200,56 +163,37 @@ class GPSAttackManager:
         scenario._dt_cached = float(dt)
         active = scenario.mask
 
-        # replay: global delay + small jitter
+        # replay: a common delay tau_atk for all attacked UAVs.
         if scenario.atk_type == "replay" and scenario.replay_delay_steps is None:
             lo_s, hi_s = self.params["replay_delay_range"]
-            replay_jitter_seconds = float(self.params["replay_jitter_seconds"])
+            delay_s = float(self.rng.uniform(float(lo_s), float(hi_s)))
+            delay_steps_scalar = int(max(1, np.round(delay_s / dt)))
 
-            global_delay_s = float(self.rng.uniform(float(lo_s), float(hi_s)))
-            global_delay_steps = int(max(0, np.round(global_delay_s / dt)))
-
-            jitter_s = self.rng.normal(
-                loc=0.0,
-                scale=replay_jitter_seconds,
-                size=self.N
-            ).astype(np.float32)
-            jitter_steps = np.round(jitter_s / dt).astype(np.int32)
-
-            delay_steps = np.full((self.N,), global_delay_steps, dtype=np.int32) + jitter_steps
-            delay_steps = np.maximum(delay_steps, 0)
+            delay_steps = np.full((self.N,), delay_steps_scalar, dtype=np.int32)
             delay_steps[~active] = 0
 
-            scenario.global_replay_delay_steps = int(global_delay_steps)
-            scenario.replay_delay_jitter_steps = jitter_steps.astype(np.int32)
+            scenario.global_replay_delay_steps = int(delay_steps_scalar)
             scenario.replay_delay_steps = delay_steps.astype(np.int32)
 
-        # stealth: global direction + small per-node jitter
+        # stealth: each attacked UAV keeps a fixed drift direction during the attack.
         if scenario.atk_type == "stealth" and scenario.stealth_dir is None:
-            use_heading_as_main_dir = bool(self.params["use_heading_as_main_dir"])
-            stealth_dir_jitter = float(self.params["stealth_dir_jitter"])
-            stealth_pull_ratio = float(self.params["stealth_pull_ratio"])
-
-            # choose global main direction
-            if use_heading_as_main_dir and heading_at_t0 is not None and np.any(active):
-                h_active = np.asarray(heading_at_t0[active], dtype=np.float32)
-                main_dir = np.mean(h_active, axis=0, keepdims=True)
-                main_dir = _unit_rows(main_dir)[0]
-            else:
-                main_dir = self.rng.normal(size=(1, D)).astype(np.float32)
-                main_dir = _unit_rows(main_dir)[0]
-
             dir_all = np.zeros((self.N, D), dtype=np.float32)
+
+            if heading_at_t0 is not None:
+                heading = _unit_rows(np.asarray(heading_at_t0, dtype=np.float32))
+            else:
+                heading = None
+
             for i in range(self.N):
                 if not active[i]:
                     continue
-                jitter = self.rng.normal(0.0, stealth_dir_jitter, size=(D,)).astype(np.float32)
-                d_i = main_dir + jitter
-                dir_all[i] = _unit_rows(d_i[None, :])[0]
+                if heading is not None:
+                    dir_all[i] = heading[i]
+                else:
+                    d_i = self.rng.normal(size=(1, D)).astype(np.float32)
+                    dir_all[i] = _unit_rows(d_i)[0]
 
-            scenario.global_stealth_dir = main_dir.astype(np.float32)
             scenario.stealth_dir = dir_all.astype(np.float32)
-            scenario.stealth_pull_ratio = float(stealth_pull_ratio)
-
     # ------------------------
     # apply
     # ------------------------
@@ -289,8 +233,9 @@ class GPSAttackManager:
             sigma = float(self.params["random_sigma"])
             m = int(active.sum())
             if m > 0:
+                true_now = np.asarray(hist_true_pos[-1], dtype=np.float32)
                 noise = self.rng.normal(0.0, sigma, size=(m, D)).astype(np.float32)
-                z[active] += noise
+                z[active] = true_now[active] + noise
 
         # --------------------
         # replay
@@ -311,7 +256,7 @@ class GPSAttackManager:
                 z[active] = np.stack(rows, axis=0)
 
         # --------------------
-        # stealth with pull_hold
+        # stealthy drift: fixed direction, bounded linear growth
         # --------------------
         elif typ == "stealth":
             rate = float(self.params["stealth_rate"])
@@ -320,17 +265,12 @@ class GPSAttackManager:
                 dirs = np.zeros((self.N, D), dtype=np.float32)
                 dirs[:, 0] = 1.0
 
-            denom = max(1, scenario.t1 - scenario.t0)
-            progress = float(t - scenario.t0) / float(denom)
-            pull_ratio = 0.65 if scenario.stealth_pull_ratio is None else float(scenario.stealth_pull_ratio)
-            amp = _pull_hold_curve(progress, pull_ratio=pull_ratio)
-
-            # 最大拖拽幅值 = rate * 持续总时间
-            total_drift = rate * dt * float(denom) * amp
+            elapsed_steps = max(0, int(t) - int(scenario.t0))
+            drift_norm = rate * float(dt) * float(elapsed_steps)
 
             if active.any():
-                z[active] = gps[active] + total_drift * dirs[active]
-
+                true_now = np.asarray(hist_true_pos[-1], dtype=np.float32)
+                z[active] = true_now[active] + drift_norm * dirs[active]
         elif typ == "none":
                 return gps, np.zeros(self.N, dtype=bool)
 

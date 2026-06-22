@@ -1,4 +1,4 @@
-# file: envs/env_core.py
+﻿# file: envs/env_core.py
 from __future__ import annotations
 
 import gym
@@ -6,7 +6,7 @@ import numpy as np
 from typing import List, Any, Dict, Optional, Callable
 from gym import spaces
 
-from envs.stage2DetectEnvISAC5 import Stage2ISACDetectEnv
+from envs.stage2DetectEnvISAC52 import Stage2ISACDetectEnv
 # from envs.stage2DetectEnv import Stage2DetectEnv
 # 改成你实际的导入路径
 from envs.MultiUAVSphereEnv import MultiUAVSphereEnv
@@ -218,8 +218,10 @@ class EnvCore(object):
             "residual_dd",
             "residual_dir_err",
             "residual_mask",
+            "nbr_rel_bias_norm",
+            "nbr_dp_prominence_log",
             "pair_geo_mean",
-            "pair_geo_max",
+            "nbr_pair_geo_ema_error",
         ):
             if key in info:
                 sub_agent_info[0][key] = info[key]

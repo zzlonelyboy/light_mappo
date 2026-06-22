@@ -1,4 +1,4 @@
-"""
+﻿"""
 # @Time    : 2021/7/2 5:22 下午
 # @Author  : hezhiqiang
 # @Email   : tinyzqh@163.com
@@ -101,10 +101,6 @@ class DiscreteActionEnv(object):
             "replay_delay_lo": 0.5,
             "replay_delay_hi": 1.5,
             "p_global": False,
-
-            "replay_jitter_seconds": 0.18,
-            "stealth_dir_jitter": 0.90,
-            "stealth_pull_ratio": 0.45,
         }
 
         stage1Env=ContinuousActionEnv()
