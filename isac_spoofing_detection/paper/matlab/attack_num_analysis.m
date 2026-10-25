@@ -1,0 +1,719 @@
+%% plot_attacked_uav_count_3features.m
+% Detection performance versus the global number of attacked UAVs.
+%
+% Data source
+%   evaluation_test.json from each feature configuration and training seed
+%
+% Feature configurations
+%   position_only
+%   no_neighbor
+%   inter_uav_consistency
+%
+% Metrics
+%   Event Precision
+%   Event Recall
+%   Event F1
+%   Mean Delay
+%
+% The script assumes that each attacked UAV has one attack event in an
+% episode. This assumption is explicitly verified before aggregation.
+
+clear;
+close all;
+clc;
+
+%% 1. Experiment directory
+
+% Derive the project directory from this script so that the analysis does
+% not depend on a machine-specific absolute path. The raw test records are
+% read from the current experimentsCubic main experiment.
+scriptDir = fileparts(mfilename('fullpath'));
+
+if isempty(scriptDir)
+    scriptDir = pwd;
+end
+
+projectRoot = fileparts(fileparts(scriptDir));
+experimentsRoot = fullfile(projectRoot, 'experimentsCubic');
+experimentDir = fullfile(experimentsRoot, 'mlp16_objective_fa_only');
+
+runsDir = fullfile(experimentDir, 'runs');
+
+assert(isfolder(runsDir), ...
+    'The runs directory does not exist:\n%s', runsDir);
+
+outputDir = fullfile(scriptDir, 'attacked_uav_count_figures');
+
+if ~isfolder(outputDir)
+    mkdir(outputDir);
+end
+
+%% 2. Analysis configuration
+
+featureSets = [ ...
+    "position_only", ...
+    "no_neighbor", ...
+    "inter_uav_consistency" ...
+];
+
+featureLabels = { ...
+    'Position Only', ...
+    'Local Features', ...
+    'Full Features' ...
+};
+
+expectedSeeds = [ ...
+    20260716, ...
+    20260717, ...
+    20260718 ...
+];
+
+attackCounts = 1:4;
+
+metricNames = [ ...
+    "event_precision", ...
+    "event_recall", ...
+    "event_f1", ...
+    "delay_mean_s" ...
+];
+
+metricTitles = { ...
+    'Event Precision', ...
+    'Event Recall', ...
+    'Event F1', ...
+    'Mean Delay' ...
+};
+
+panelTitles = { ...
+    '(a) Event Precision', ...
+    '(b) Event Recall', ...
+    '(c) Event F1', ...
+    '(d) Mean Delay' ...
+};
+
+colors = [ ...
+    0.0000, 0.4470, 0.7410
+    0.8500, 0.3250, 0.0980
+    0.4660, 0.6740, 0.1880
+];
+
+lineStyles = {'--', '-.', '-'};
+markers = {'o', 's', '^'};
+
+nFeature = numel(featureSets);
+nSeed = numel(expectedSeeds);
+nCount = numel(attackCounts);
+nMetric = numel(metricNames);
+
+%% 3. Allocate storage
+
+% Dimensions
+% feature configuration x attacked-UAV count x metric x seed
+perSeedValues = nan(nFeature, nCount, nMetric, nSeed);
+
+groupEpisodeCounts = zeros(nFeature, nCount, nSeed);
+groupAttackEvents = zeros(nFeature, nCount, nSeed);
+
+nRows = nFeature * nCount * nSeed;
+
+rowFeature = strings(nRows, 1);
+rowSeed = zeros(nRows, 1);
+rowAttackCount = zeros(nRows, 1);
+rowNumEpisodes = zeros(nRows, 1);
+rowNumAttackEvents = zeros(nRows, 1);
+rowTP = zeros(nRows, 1);
+rowFP = zeros(nRows, 1);
+rowFN = zeros(nRows, 1);
+rowPrecision = nan(nRows, 1);
+rowRecall = nan(nRows, 1);
+rowF1 = nan(nRows, 1);
+rowDelay = nan(nRows, 1);
+
+rowIndex = 0;
+
+referenceEpisodeIds = strings(0, 1);
+referenceConfirmationSteps = [];
+referenceDt = [];
+
+%% 4. Read and aggregate the evaluation records
+
+for featureIndex = 1:nFeature
+
+    featureSet = featureSets(featureIndex);
+
+    for seedIndex = 1:nSeed
+
+        seed = expectedSeeds(seedIndex);
+
+        runDir = fullfile( ...
+            runsDir, ...
+            sprintf('%s_seed%d', char(featureSet), seed));
+
+        infoFile = fullfile(runDir, 'final_info.json');
+        evaluationFile = fullfile(runDir, 'evaluation_test.json');
+
+        assert(isfile(infoFile), ...
+            'Missing final_info.json:\n%s', infoFile);
+
+        assert(isfile(evaluationFile), ...
+            'Missing evaluation_test.json:\n%s', evaluationFile);
+
+        info = jsondecode(fileread(infoFile));
+        evaluation = jsondecode(fileread(evaluationFile));
+
+        %% Validate model metadata
+
+        assert(string(info.feature_set) == featureSet, ...
+            'Feature-set mismatch in:\n%s', infoFile);
+
+        actualSeed = double(info.training.training_config.seed);
+
+        assert(actualSeed == seed, ...
+            'Training-seed mismatch in:\n%s', infoFile);
+
+        assert(strcmpi(string(evaluation.split), "test"), ...
+            'The evaluation split is not test in:\n%s', evaluationFile);
+
+        if isempty(referenceConfirmationSteps)
+            referenceConfirmationSteps = ...
+                double(evaluation.confirmation_steps);
+        else
+            assert( ...
+                double(evaluation.confirmation_steps) == ...
+                referenceConfirmationSteps, ...
+                'Different confirmation lengths are used across runs.');
+        end
+
+        if isempty(referenceDt)
+            referenceDt = double(evaluation.dt_s);
+        else
+            assert(abs(double(evaluation.dt_s) - referenceDt) < 1e-12, ...
+                'Different sampling intervals are used across runs.');
+        end
+
+        %% Read episode-level records
+
+        episodes = evaluation.episodes;
+
+        if iscell(episodes)
+            episodes = [episodes{:}];
+        end
+
+        episodes = episodes(:);
+
+        assert(~isempty(episodes), ...
+            'No episode records found in:\n%s', evaluationFile);
+
+        episodeIds = sort(string({episodes.episode_id}));
+
+        if isempty(referenceEpisodeIds)
+            referenceEpisodeIds = episodeIds;
+        else
+            assert(isequal(episodeIds, referenceEpisodeIds), ...
+                ['The feature configurations or seeds were not evaluated ' ...
+                 'on identical test episodes.']);
+        end
+
+        %% Verify the meaning of the horizontal variable
+
+        % The number of attack events must equal the number of unique
+        % attacked UAVs. This is valid for the current primary dataset,
+        % where each attacked UAV has one attack event per episode.
+
+        for episodeIndex = 1:numel(episodes)
+
+            if logical(episodes(episodeIndex).clean_episode)
+                continue;
+            end
+
+            attackEvents = episodes(episodeIndex).attack_events;
+
+            if iscell(attackEvents)
+                attackEvents = [attackEvents{:}];
+            end
+
+            assert(~isempty(attackEvents), ...
+                'An attacked episode contains no attack-event records.');
+
+            attackedUavs = unique(double([attackEvents.uav]));
+            numAttackEvents = ...
+                double(episodes(episodeIndex).num_attack_events);
+
+            assert(numel(attackedUavs) == numAttackEvents, ...
+                ['Episode %s contains multiple attack events for the same ' ...
+                 'UAV. In this case, num_attack_events cannot be used as ' ...
+                 'the number of attacked UAVs.'], ...
+                string(episodes(episodeIndex).episode_id));
+        end
+
+        %% Group attacked episodes by the number of attacked UAVs
+
+        cleanMask = logical([episodes.clean_episode]);
+        episodeAttackCounts = double([episodes.num_attack_events]);
+
+        for countIndex = 1:nCount
+
+            attackCount = attackCounts(countIndex);
+
+            groupMask = ...
+                ~cleanMask & ...
+                episodeAttackCounts == attackCount;
+
+            groupEpisodes = episodes(groupMask);
+
+            assert(~isempty(groupEpisodes), ...
+                ['No attacked episodes were found for feature %s, ' ...
+                 'seed %d, and attack count %d.'], ...
+                featureSet, seed, attackCount);
+
+            numEpisodes = numel(groupEpisodes);
+            numAttackEvents = ...
+                sum(double([groupEpisodes.num_attack_events]));
+
+            truePositives = ...
+                sum(double([groupEpisodes.true_positives]));
+
+            falsePositives = ...
+                sum(double([groupEpisodes.false_positives]));
+
+            falseNegatives = ...
+                sum(double([groupEpisodes.false_negatives]));
+
+            %% Collect successful detection delays
+
+            detectedDelays = zeros(0, 1);
+
+            for episodeIndex = 1:numEpisodes
+
+                currentDelays = ...
+                    double(groupEpisodes(episodeIndex).detected_delays_s);
+
+                detectedDelays = [ ...
+                    detectedDelays
+                    currentDelays(:) ...
+                ]; %#ok<AGROW>
+            end
+
+            %% Calculate event-level metrics
+
+            if truePositives + falsePositives > 0
+                eventPrecision = ...
+                    truePositives / ...
+                    (truePositives + falsePositives);
+            else
+                eventPrecision = NaN;
+            end
+
+            if truePositives + falseNegatives > 0
+                eventRecall = ...
+                    truePositives / ...
+                    (truePositives + falseNegatives);
+            else
+                eventRecall = NaN;
+            end
+
+            if isfinite(eventPrecision) && ...
+                    isfinite(eventRecall) && ...
+                    eventPrecision + eventRecall > 0
+
+                eventF1 = ...
+                    2 * eventPrecision * eventRecall / ...
+                    (eventPrecision + eventRecall);
+            else
+                eventF1 = NaN;
+            end
+
+            if isempty(detectedDelays)
+                meanDelay = NaN;
+            else
+                meanDelay = mean(detectedDelays);
+            end
+
+            %% Store per-seed results
+
+            perSeedValues(featureIndex, countIndex, 1, seedIndex) = ...
+                eventPrecision;
+
+            perSeedValues(featureIndex, countIndex, 2, seedIndex) = ...
+                eventRecall;
+
+            perSeedValues(featureIndex, countIndex, 3, seedIndex) = ...
+                eventF1;
+
+            perSeedValues(featureIndex, countIndex, 4, seedIndex) = ...
+                meanDelay;
+
+            groupEpisodeCounts(featureIndex, countIndex, seedIndex) = ...
+                numEpisodes;
+
+            groupAttackEvents(featureIndex, countIndex, seedIndex) = ...
+                numAttackEvents;
+
+            %% Add one row to the traceability table
+
+            rowIndex = rowIndex + 1;
+
+            rowFeature(rowIndex) = featureSet;
+            rowSeed(rowIndex) = seed;
+            rowAttackCount(rowIndex) = attackCount;
+            rowNumEpisodes(rowIndex) = numEpisodes;
+            rowNumAttackEvents(rowIndex) = numAttackEvents;
+            rowTP(rowIndex) = truePositives;
+            rowFP(rowIndex) = falsePositives;
+            rowFN(rowIndex) = falseNegatives;
+            rowPrecision(rowIndex) = eventPrecision;
+            rowRecall(rowIndex) = eventRecall;
+            rowF1(rowIndex) = eventF1;
+            rowDelay(rowIndex) = meanDelay;
+        end
+    end
+end
+
+%% 5. Verify identical group sizes
+
+for countIndex = 1:nCount
+
+    currentEpisodeCounts = ...
+        groupEpisodeCounts(:, countIndex, :);
+
+    currentEpisodeCounts = currentEpisodeCounts(:);
+
+    assert(all(currentEpisodeCounts == currentEpisodeCounts(1)), ...
+        ['The number of test episodes differs across features or seeds ' ...
+         'for attack count %d.'], ...
+        attackCounts(countIndex));
+
+    currentEventCounts = ...
+        groupAttackEvents(:, countIndex, :);
+
+    currentEventCounts = currentEventCounts(:);
+
+    assert(all(currentEventCounts == currentEventCounts(1)), ...
+        ['The number of attack events differs across features or seeds ' ...
+         'for attack count %d.'], ...
+        attackCounts(countIndex));
+end
+
+%% 6. Save per-seed records
+
+perSeedTable = table( ...
+    rowFeature, ...
+    rowSeed, ...
+    rowAttackCount, ...
+    rowNumEpisodes, ...
+    rowNumAttackEvents, ...
+    rowTP, ...
+    rowFP, ...
+    rowFN, ...
+    rowPrecision, ...
+    rowRecall, ...
+    rowF1, ...
+    rowDelay, ...
+    'VariableNames', { ...
+        'feature_set', ...
+        'training_seed', ...
+        'attacked_uav_count', ...
+        'num_episodes', ...
+        'num_attack_events', ...
+        'true_positives', ...
+        'false_positives', ...
+        'false_negatives', ...
+        'event_precision', ...
+        'event_recall', ...
+        'event_f1', ...
+        'delay_mean_s' ...
+    });
+
+perSeedFile = fullfile( ...
+    outputDir, ...
+    'attacked_uav_count_3features_per_seed.csv');
+
+writetable(perSeedTable, perSeedFile);
+
+%% 7. Calculate mean and sample standard deviation
+
+metricMean = nan(nFeature, nCount, nMetric);
+metricStd = nan(nFeature, nCount, nMetric);
+
+for featureIndex = 1:nFeature
+    for countIndex = 1:nCount
+        for metricIndex = 1:nMetric
+
+            values = squeeze(perSeedValues( ...
+                featureIndex, ...
+                countIndex, ...
+                metricIndex, ...
+                :));
+
+            metricMean(featureIndex, countIndex, metricIndex) = ...
+                mean(values, 'omitnan');
+
+            metricStd(featureIndex, countIndex, metricIndex) = ...
+                std(values, 0, 'omitnan');
+        end
+    end
+end
+
+%% 8. Save the across-seed summary
+
+nSummaryRows = nFeature * nCount;
+
+summaryFeature = strings(nSummaryRows, 1);
+summaryAttackCount = zeros(nSummaryRows, 1);
+summaryNumSeeds = zeros(nSummaryRows, 1);
+summaryNumEpisodes = zeros(nSummaryRows, 1);
+summaryNumEvents = zeros(nSummaryRows, 1);
+
+precisionMean = nan(nSummaryRows, 1);
+precisionStd = nan(nSummaryRows, 1);
+recallMean = nan(nSummaryRows, 1);
+recallStd = nan(nSummaryRows, 1);
+f1Mean = nan(nSummaryRows, 1);
+f1Std = nan(nSummaryRows, 1);
+delayMean = nan(nSummaryRows, 1);
+delayStd = nan(nSummaryRows, 1);
+
+summaryIndex = 0;
+
+for featureIndex = 1:nFeature
+    for countIndex = 1:nCount
+
+        summaryIndex = summaryIndex + 1;
+
+        summaryFeature(summaryIndex) = ...
+            featureSets(featureIndex);
+
+        summaryAttackCount(summaryIndex) = ...
+            attackCounts(countIndex);
+
+        summaryNumSeeds(summaryIndex) = nSeed;
+
+        summaryNumEpisodes(summaryIndex) = ...
+            groupEpisodeCounts(featureIndex, countIndex, 1);
+
+        summaryNumEvents(summaryIndex) = ...
+            groupAttackEvents(featureIndex, countIndex, 1);
+
+        precisionMean(summaryIndex) = ...
+            metricMean(featureIndex, countIndex, 1);
+
+        precisionStd(summaryIndex) = ...
+            metricStd(featureIndex, countIndex, 1);
+
+        recallMean(summaryIndex) = ...
+            metricMean(featureIndex, countIndex, 2);
+
+        recallStd(summaryIndex) = ...
+            metricStd(featureIndex, countIndex, 2);
+
+        f1Mean(summaryIndex) = ...
+            metricMean(featureIndex, countIndex, 3);
+
+        f1Std(summaryIndex) = ...
+            metricStd(featureIndex, countIndex, 3);
+
+        delayMean(summaryIndex) = ...
+            metricMean(featureIndex, countIndex, 4);
+
+        delayStd(summaryIndex) = ...
+            metricStd(featureIndex, countIndex, 4);
+    end
+end
+
+summaryTable = table( ...
+    summaryFeature, ...
+    summaryAttackCount, ...
+    summaryNumSeeds, ...
+    summaryNumEpisodes, ...
+    summaryNumEvents, ...
+    precisionMean, ...
+    precisionStd, ...
+    recallMean, ...
+    recallStd, ...
+    f1Mean, ...
+    f1Std, ...
+    delayMean, ...
+    delayStd, ...
+    'VariableNames', { ...
+        'feature_set', ...
+        'attacked_uav_count', ...
+        'num_seeds', ...
+        'num_episodes_per_seed', ...
+        'num_attack_events_per_seed', ...
+        'event_precision_mean', ...
+        'event_precision_std', ...
+        'event_recall_mean', ...
+        'event_recall_std', ...
+        'event_f1_mean', ...
+        'event_f1_std', ...
+        'delay_mean_s', ...
+        'delay_std_s' ...
+    });
+
+summaryFile = fullfile( ...
+    outputDir, ...
+    'attacked_uav_count_3features_summary.csv');
+
+writetable(summaryTable, summaryFile);
+
+%% 9. Determine common axis ranges
+
+scoreValues = metricMean(:, :, 1:3) - metricStd(:, :, 1:3);
+scoreValues = scoreValues(isfinite(scoreValues));
+
+if isempty(scoreValues)
+    scoreLowerLimit = 0;
+else
+    scoreLowerLimit = max(0, min(scoreValues) - 0.02);
+    scoreLowerLimit = floor(scoreLowerLimit * 20) / 20;
+
+    % Avoid an excessively truncated score axis.
+    scoreLowerLimit = min(scoreLowerLimit, 0.75);
+end
+
+delayValues = ...
+    metricMean(:, :, 4) + metricStd(:, :, 4);
+
+delayValues = delayValues(isfinite(delayValues));
+
+if isempty(delayValues)
+    delayUpperLimit = 1;
+else
+    delayUpperLimit = ...
+        ceil(1.10 * max(delayValues) * 2) / 2;
+end
+
+%% 10. Generate the 2-by-2 figure
+
+figureHandle = figure( ...
+    'Color', 'w', ...
+    'Units', 'centimeters', ...
+    'Position', [2, 2, 18, 12]);
+
+layoutHandle = tiledlayout( ...
+    figureHandle, ...
+    2, ...
+    2, ...
+    'TileSpacing', 'compact', ...
+    'Padding', 'compact');
+
+legendHandles = gobjects(nFeature, 1);
+firstAxes = gobjects(1);
+
+for metricIndex = 1:nMetric
+
+    axesHandle = nexttile(layoutHandle);
+    hold(axesHandle, 'on');
+
+    if metricIndex == 1
+        firstAxes = axesHandle;
+    end
+
+    for featureIndex = 1:nFeature
+
+        yValues = squeeze(metricMean( ...
+            featureIndex, ...
+            :, ...
+            metricIndex));
+
+        errorValues = squeeze(metricStd( ...
+            featureIndex, ...
+            :, ...
+            metricIndex));
+
+        plotHandle = errorbar( ...
+            axesHandle, ...
+            attackCounts, ...
+            yValues, ...
+            errorValues, ...
+            'Color', colors(featureIndex, :), ...
+            'LineStyle', lineStyles{featureIndex}, ...
+            'Marker', markers{featureIndex}, ...
+            'LineWidth', 1.35, ...
+            'MarkerSize', 5.5, ...
+            'MarkerFaceColor', 'w', ...
+            'CapSize', 5);
+
+        if metricIndex == 1
+            legendHandles(featureIndex) = plotHandle;
+        end
+    end
+
+    grid(axesHandle, 'on');
+    box(axesHandle, 'on');
+
+    axesHandle.XTick = attackCounts;
+    axesHandle.XLim = [0.8, 4.2];
+    axesHandle.FontName = 'Times New Roman';
+    axesHandle.FontSize = 8.5;
+    axesHandle.LineWidth = 0.8;
+    axesHandle.TickDir = 'out';
+
+    title( ...
+        axesHandle, ...
+        panelTitles{metricIndex}, ...
+        'FontName', 'Times New Roman', ...
+        'FontSize', 9.5, ...
+        'FontWeight', 'normal');
+
+    if metricIndex <= 3
+        ylim(axesHandle, [scoreLowerLimit, 1.01]);
+        ylabel(axesHandle, 'Score');
+    else
+        ylim(axesHandle, [0, delayUpperLimit]);
+        ylabel(axesHandle, 'Seconds');
+    end
+
+    if metricIndex >= 3
+        xlabel( ...
+            axesHandle, ...
+            'Number of Attacked UAVs', ...
+            'FontName', 'Times New Roman', ...
+            'FontSize', 9);
+    end
+
+    hold(axesHandle, 'off');
+end
+
+%% 11. Add the common legend
+
+legendHandle = legend( ...
+    firstAxes, ...
+    legendHandles, ...
+    featureLabels, ...
+    'Orientation', 'horizontal', ...
+    'NumColumns', nFeature, ...
+    'FontName', 'Times New Roman', ...
+    'FontSize', 8.5, ...
+    'Box', 'off');
+
+legendHandle.Layout.Tile = 'north';
+
+%% 12. Export the figure
+
+outputBase = fullfile( ...
+    outputDir, ...
+    'attacked_uav_count_3features');
+
+exportgraphics( ...
+    figureHandle, ...
+    [outputBase, '.png'], ...
+    'Resolution', 600);
+
+exportgraphics( ...
+    figureHandle, ...
+    [outputBase, '.pdf'], ...
+    'ContentType', 'vector');
+
+print( ...
+    figureHandle, ...
+    [outputBase, '.eps'], ...
+    '-depsc', ...
+    '-painters');
+
+savefig(figureHandle, [outputBase, '.fig']);
+
+fprintf('Experiment records read from\n%s\n\n', runsDir);
+fprintf('Per-seed results saved to\n%s\n\n', perSeedFile);
+fprintf('Across-seed summary saved to\n%s\n\n', summaryFile);
+fprintf('Figures saved with prefix\n%s\n', outputBase);

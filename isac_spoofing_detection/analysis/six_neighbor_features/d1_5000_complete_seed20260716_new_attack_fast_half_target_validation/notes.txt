@@ -1,0 +1,30 @@
+Six proposed neighbor-feature separability audit
+=================================================
+
+Dataset: D:\Codes\project_spoofing_detect\light_mappo\isac_spoofing_detection\data\d1_5000_complete_seed20260716_new_attack_fast_half_target
+Split: validation
+Nearest ISAC neighbors: 3
+
+This run diagnoses individual feature-label separation. It does not train a
+detector and does not establish the multivariate contribution of a feature.
+Step-level AUC/AP values are descriptive because consecutive steps from the
+same episode are correlated. Episode-paired Wilcoxon results compare the mean
+feature in attacked and normal UAV-steps within each attack episode, with
+Benjamini-Hochberg correction across the six tests.
+
+Ranking by direction-invariant ROC-AUC:
+1. signed_self_neighbor_anomaly_contrast: AUC=0.6458, AP=0.1376, Cohen d=+0.5585, episode FDR-p=2.99e-48
+2. neighbor_anomaly_median: AUC=0.5592, AP=0.0813, Cohen d=-0.1954, episode FDR-p=2.895e-12
+3. mean_gps_isac_geometry_error: AUC=0.5485, AP=0.0868, Cohen d=+0.1824, episode FDR-p=2.727e-06
+4. neighbor_common_bias_norm: AUC=0.5274, AP=0.0733, Cohen d=-0.1108, episode FDR-p=5.758e-10
+5. neighbor_error_direction_coherence: AUC=0.5270, AP=0.0802, Cohen d=+0.0911, episode FDR-p=0.8542
+6. mean_error_vector_disagreement: AUC=0.5212, AP=0.0811, Cohen d=+0.0944, episode FDR-p=0.005087
+
+Heuristic interpretation for diagnostic use only:
+- AUC close to 0.50: little univariate separation.
+- AUC 0.55--0.65: weak/limited separation.
+- AUC 0.65--0.75: moderate separation.
+- AUC above 0.75: strong univariate separation.
+
+Figure_1.png shows sampled class-conditional distributions.
+Figure_2.png shows direction-invariant univariate ROC curves.

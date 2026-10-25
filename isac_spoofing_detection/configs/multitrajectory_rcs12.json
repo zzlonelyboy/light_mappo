@@ -1,0 +1,53 @@
+{
+  "simulation": {
+    "num_uavs": 8,
+    "dt_s": 0.1,
+    "duration_s": 60.0,
+    "speed_mps": 4.0,
+    "trajectory_types": ["straight", "circle", "helix", "s_curve"],
+    "formation_type": "cubic",
+    "cube_edge_length_m": 8.0,
+    "formation_jitter_std_m": 0.5,
+    "s_curve_start_m": [0.0, 0.0, 10.0],
+    "s_curve_target_m": [100.0, 100.0, 50.0],
+    "s_curve_lateral_amplitude_m": 44.0
+  },
+  "gps": {
+    "noise_std_m": [0.0, 0.0, 0.0]
+  },
+  "attack": {
+    "clean_episode_probability": 0.25,
+    "attack_types": ["random", "replay", "stealth"],
+    "duration_fraction_range": [0.2, 0.4],
+    "target_count_range": [1, 4],
+    "severity_levels": ["weak", "medium", "strong"],
+    "random_sigma_ranges_m": [[0.25, 0.75], [0.75, 1.5], [1.5, 3.0]],
+    "replay_delay_ranges_s": [[0.2, 0.5], [0.5, 1.5], [1.5, 3.0]],
+    "stealth_rate_ranges_mps": [[0.1, 0.3], [0.3, 0.8], [0.8, 1.2]]
+  },
+  "isac": {
+    "anchors_m": [[25.0, 35.0, 5.0], [25.0, 70.0, 25.0], [60.0, 35.0, 35.0], [85.0, 70.0, 15.0]],
+    "carrier_hz": 3000000000.0,
+    "bandwidth_hz": 30000000.0,
+    "tx_power_dbm": 27.0,
+    "radar_cross_section": 12.0,
+    "coherent_time_s": 0.05,
+    "effective_aperture_m": 0.35
+  },
+  "features": {
+    "warmup_steps": 0,
+    "position_scale_m": 1.0,
+    "num_neighbors": 3,
+    "neighbor_feature_mode": "current",
+    "neighbor_selection_mode": "dynamic_isac"
+  },
+  "localization": {
+    "iterations": 50,
+    "damping": 0.00001,
+    "tolerance_m": 0.00001,
+    "step_clip_m": 10.0,
+    "line_search_steps": 8,
+    "relative_improvement_tolerance": 0.001,
+    "min_anchors": 4
+  }
+}

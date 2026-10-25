@@ -1,0 +1,99 @@
+{
+  "schema_version": "1.0",
+  "analysis_date": "2026-07-17",
+  "verification_status": "VERIFIED",
+  "overall_confidence": "CAUTION",
+  "source_run": "runs/pilot_mlp_seed20260716",
+  "test_performance_opened": false,
+  "reproducibility": {
+    "same_seed_exact_match": true,
+    "training_history_exact_match": true,
+    "validation_results_exact_match": true,
+    "checkpoint_sha256": "F6A6793A678350F447E639D080CC6BBB4994861FA1E147E9C3B0D1E7CCE8CC2A"
+  },
+  "split_integrity": {
+    "train_validation_episode_id_overlap": 0,
+    "train_test_episode_id_overlap": 0,
+    "validation_test_episode_id_overlap": 0,
+    "train_validation_feature_hash_overlap": 0,
+    "train_test_feature_hash_overlap": 0,
+    "validation_test_feature_hash_overlap": 0,
+    "standardization_source": "train_only",
+    "direct_label_input_found": false,
+    "future_feature_input_found": false
+  },
+  "three_seed_validation": {
+    "seeds": [20260716, 20260717, 20260718],
+    "selected_k": [5, 5, 5],
+    "step_f1_mean": 0.9171280928720792,
+    "step_f1_sample_sd": 0.0016466420624362092,
+    "event_f1_mean": 0.9751949295678058,
+    "event_f1_sample_sd": 0.0018969304003137923,
+    "event_recall_mean": 0.977366255144033,
+    "event_recall_sample_sd": 0.0,
+    "false_alarms_per_uav_hour_mean": 1.1797001968655803,
+    "false_alarms_per_uav_hour_sample_sd": 0.16960529857018153,
+    "median_delay_s": 0.4
+  },
+  "negative_controls": {
+    "shuffled_training_labels_f1": 0.09530078150349035,
+    "permuted_validation_alignment_f1": 0.10596363245209585,
+    "interpretation": "Performance collapses when the feature-label relationship is destroyed."
+  },
+  "sampled_simple_baselines": {
+    "train_steps": 350000,
+    "validation_steps": 150000,
+    "single_mean_direction_auc": 0.9749430934648301,
+    "single_max_range_stump_f1": 0.8671117269177478,
+    "linear_f15_f1": 0.9175684788542436,
+    "linear_instant_residual_6_f1": 0.9229716520039101,
+    "linear_residual_9_f1": 0.924030102504217,
+    "linear_no_cusum_12_f1": 0.9150940363285646,
+    "linear_cusum_3_f1": 0.8605645292869962,
+    "linear_self_2_f1": 0.527236689221516,
+    "linear_neighbor_4_f1": 0.3496721215777082
+  },
+  "selected_validation_event_metrics": {
+    "k": 5,
+    "uav_attack_events": 972,
+    "true_positives": 950,
+    "false_positives": 28,
+    "false_negatives": 22,
+    "event_precision": 0.9713701431492843,
+    "event_recall": 0.977366255144033,
+    "event_f1": 0.9743589743589745,
+    "event_f1_episode_cluster_bootstrap_ci95": [0.9623748764896854, 0.9843755897710116],
+    "false_alarms_per_uav_hour": 1.2543647662874524,
+    "false_alarms_per_uav_hour_episode_cluster_bootstrap_ci95": [0.7153508466115565, 1.8833396416196042],
+    "median_delay_s": 0.4,
+    "median_delay_episode_cluster_bootstrap_ci95_s": [0.4, 0.5]
+  },
+  "subgroup_checks": {
+    "random_event_f1": 0.9801136363636364,
+    "replay_event_f1": 0.9861751152073733,
+    "stealth_event_f1": 0.9546218487394958,
+    "weak_event_f1": 0.9672131147540983,
+    "medium_event_f1": 0.9877675840978594,
+    "strong_event_f1": 0.9680851063829787,
+    "complete_event_recall": 1.0,
+    "truncated_event_recall": 0.9137254901960784,
+    "early_onset_event_recall": 1.0,
+    "middle_onset_event_recall": 1.0,
+    "late_onset_event_recall": 0.930379746835443,
+    "duration_1_to_4_steps_events": 18,
+    "duration_1_to_4_steps_detected": 0
+  },
+  "false_alarm_sources": {
+    "after_attack": 21,
+    "duplicate_inside_attack": 6,
+    "unattacked_uav": 1,
+    "before_attack": 0
+  },
+  "primary_findings": [
+    "No direct implementation-level label leakage or split duplication was found.",
+    "The result is exactly reproducible and stable across three initialization seeds.",
+    "The nominal data are highly separable; simple instantaneous-residual baselines match or exceed the MLP step-level F1.",
+    "Aggregate event performance is amplified by long attacks and K-step confirmation.",
+    "The current evidence supports nominal same-generator feasibility, not real-world or distribution-shift robustness."
+  ]
+}

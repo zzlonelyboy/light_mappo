@@ -1,0 +1,92 @@
+% Table 1: Feature Ablation (event-likelihood loss, K=5, τ=0.1)
+% Generated automatically — do not edit by hand
+\begin{table}[t]
+\centering
+\caption{Feature ablation study under event-likelihood loss ($K=5,\tau=0.1$).
+All metrics reported on the test split (mean over 3 seeds).
+F3 removes ISAC BS-link residual statistics, retaining only GPS-ISAC position discrepancy
+and signed neighbor anomaly contrast.}
+\label{tab:feature_ablation}
+\begin{tabular}{lcccccc}
+\toprule
+\multicolumn{7}{c}{\textbf{(a) RCS = 6 (practical conditions)}} \\
+\midrule
+Feature Set & Dim & Event F1$\uparrow$ & Event Prec.$\uparrow$ & Event Rec.$\uparrow$ & FAR$\downarrow$ & Delay (s)$\downarrow$ \\
+\midrule
+  Position only & 3 & 0.873 & 0.925 & 0.826 & 0.99 & 4.86 \\
+  Local & 8 & 0.965 & 0.955 & 0.975 & 0.68 & 2.87 \\
+  Full & 9 & 0.966 & 0.959 & 0.974 & 0.62 & 2.94 \\
+\midrule
+\multicolumn{7}{c}{\textbf{(b) RCS = 3 (degraded conditions)}} \\
+\midrule
+  Position only & 3 & 0.823 & 0.914 & 0.749 & 1.05 & 5.49 \\
+  Local & 8 & 0.943 & 0.944 & 0.942 & 0.83 & 3.32 \\
+  Full & 9 & 0.949 & 0.955 & 0.944 & 0.65 & 3.39 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% Table 2: Step-level BCE vs. Event-likelihood Loss
+% Generated automatically — do not edit by hand
+\begin{table}[t]
+\centering
+\caption{Impact of event-likelihood loss compared to step-level BCE.
+Both use the F9 feature set (ISAC + signed neighbor contrast).
+Metrics on test split (mean over 3 seeds).}
+\label{tab:loss_comparison}
+\begin{tabular}{lcccccc}
+\toprule
+\multicolumn{7}{c}{\textbf{(a) RCS = 6 (practical conditions)}} \\
+\midrule
+Loss & Event F1$\uparrow$ & Event Prec.$\uparrow$ & Event Rec.$\uparrow$ & FAR$\downarrow$ & Delay (s)$\downarrow$ & Detect@2s$\uparrow$ \\
+\midrule
+  BCE (step-level) & 0.944 & 0.912 & 0.979 & 1.40 & 2.87 & 0.576 \\
+  Event-likelihood & 0.966 & 0.959 & 0.974 & 0.62 & 2.94 & 0.574 \\
+\midrule
+\multicolumn{7}{c}{\textbf{(b) RCS = 3 (degraded conditions)}} \\
+\midrule
+  BCE (step-level) & 0.918 & 0.886 & 0.952 & 1.81 & 3.35 & 0.496 \\
+  Event-likelihood & 0.949 & 0.955 & 0.944 & 0.65 & 3.39 & 0.493 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% Table 3: Cross-Domain Generalization (event-likelihood loss, K=5)
+% Generated automatically — do not edit by hand
+\begin{table}[t]
+\centering
+\caption{Cross-domain generalization. Models trained on S-curve trajectories,
+evaluated on multi-trajectory test sets with matched or mismatched RCS.
+All metrics on test split (mean over 3 seeds).}
+\label{tab:cross_domain}
+\begin{tabular}{llcccc}
+\toprule
+Train Domain & Test Domain & Feat. & Event F1$\uparrow$ & FAR$\downarrow$ & Delay (s)$\downarrow$ \\
+\midrule
+\multicolumn{6}{c}{\textbf{Panel A: RCS=6 S-curve → RCS=6 Multi-traj (trajectory generalization)}} \\
+\midrule
+  RCS=6 S-curve & RCS=6 S-curve & F8 & 0.965 & 0.68 & 2.87 \\
+  RCS=6 S-curve & RCS=6 S-curve & F9 & 0.966 & 0.62 & 2.94 \\
+  RCS=6 S-curve & RCS=6 S-curve & F3 & 0.873 & 0.99 & 4.86 \\
+\cmidrule{2-6}
+  RCS=6 S-curve & RCS=6 Multi-traj & F8 & 0.937 & 1.89 & 2.00 \\
+  RCS=6 S-curve & RCS=6 Multi-traj & F9 & 0.887 & 3.69 & 1.93 \\
+\midrule
+\multicolumn{6}{c}{\textbf{Panel B: RCS=6 S-curve → RCS=3 Multi-traj (cross-RCS + cross-trajectory)}} \\
+\midrule
+  RCS=6 S-curve & RCS=3 Multi-traj & F8 & 0.698 & 13.90 & 2.34 \\
+  RCS=6 S-curve & RCS=3 Multi-traj & F9 & 0.605 & 19.16 & 2.31 \\
+\midrule
+\multicolumn{6}{c}{\textbf{Panel C: RCS=3 S-curve → RCS=6 Multi-traj (reverse cross-RCS)}} \\
+\midrule
+  RCS=3 S-curve & RCS=3 S-curve & F8 & 0.943 & 0.83 & 3.32 \\
+  RCS=3 S-curve & RCS=3 S-curve & F9 & 0.949 & 0.65 & 3.39 \\
+  RCS=3 S-curve & RCS=3 S-curve & F3 & 0.823 & 1.05 & 5.49 \\
+\cmidrule{2-6}
+  RCS=3 S-curve & RCS=6 Multi-traj & F8 & 0.968 & 0.81 & 2.09 \\
+  RCS=3 S-curve & RCS=6 Multi-traj & F9 & 0.967 & 0.80 & 2.09 \\
+\bottomrule
+\end{tabular}
+\end{table}

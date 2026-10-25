@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+data/
+
+# Generated datasets, training outputs, and temporary artifacts.
+/data*/
+/experiments*/
+/runs*/
+/tmp/
+*.npz
+*.npy
+*.pt
+*.pth
+events.out.tfevents.*
+
+# Local development state and credentials.
+/.agents/
+/.codex/
+/.claude/
+/.vscode/
+.ipynb_checkpoints/
+.env
+.env.*
+!.env.example

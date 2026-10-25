@@ -1,0 +1,32 @@
+% Table I
+\begin{table}[htbp]
+  \centering
+  \caption{Table I}
+  \label{tab:table01_simulation_setup}
+  \begin{tabular}{lc}
+    \toprule
+    Parameter & Value \\
+    \midrule
+    Number of UAVs & 8 \\
+    Number of base stations & 4 \\
+    Episode duration (s) & 60.0 \\
+    Time step dt (s) & 0.1 \\
+    Primary trajectory & S-curve \\
+    Attack types & random, replay, stealth \\
+    Attack severity levels & weak, medium, strong \\
+    Attacked UAV count range & [1, 4] \\
+    Train / Validation / Test split & 80 / 10 / 10 (episode-level) \\
+    Radar cross-section (RCS) & 3.0 \\
+    Model & gru \\
+    Hidden dimension & 64 \\
+    GRU layers & 1 \\
+    Batch size & 128 \\
+    Learning rate & 0.001 \\
+    Weight decay & 0.0001 \\
+    Detection threshold & 0.5 \\
+    Confirmation steps K & 5 \\
+    Training seeds & 20260716, 20260717, 20260718 \\
+    Bootstrap samples & 1000 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
