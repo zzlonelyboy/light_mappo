@@ -1,0 +1,9 @@
+## Table IV
+
+| Feature set | BS residual | GPS–ISAC | Neighbor | Dim | Event Precision | Event Recall | Event F1 | FAR / UAV·h | Mean Delay / s |
+|---|---|---|---|---|---|---|---|---|---|
+| 9-D main | ✓ | ✓ | ✓ | 9 | 0.955 ± 0.006 | 0.944 ± 0.001 | 0.949 ± 0.003 | 0.649 ± 0.093 | 3.385 ± 0.018 |
+| No BS residual |  | ✓ | ✓ | 3 | 0.914 ± 0.007 | 0.749 ± 0.013 | 0.823 ± 0.005 | 1.046 ± 0.113 | 5.491 ± 0.079 |
+| No neighbor | ✓ | ✓ |  | 8 | 0.944 ± 0.007 | 0.942 ± 0.001 | 0.943 ± 0.004 | 0.832 ± 0.107 | 3.316 ± 0.023 |
+
+*Note: The \texttt{No GPS--ISAC} ablation (removing only the two self-discrepancy features while retaining BS residuals and neighbor features) has not been completed yet. The current table therefore validates only the BS-residual and neighbor-feature contributions.*

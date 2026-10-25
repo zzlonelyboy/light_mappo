@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "isac-spoofing-detection"
+version = "0.1.0"
+description = "Action-free numerical simulation for online GPS spoofing event detection with ISAC assistance"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+learning = ["torch>=2.2", "matplotlib>=3.8"]
+external-baselines = [
+    "torch>=2.2",
+    "typing-extensions>=4.10",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "joblib>=1.3",
+]
+
+[project.scripts]
+isac-generate = "isac_spoofing.cli.generate_dataset:main"
+isac-deep-ensemble = "isac_spoofing.cli.run_deep_ensemble_baseline:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

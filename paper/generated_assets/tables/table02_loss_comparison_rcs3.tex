@@ -1,0 +1,16 @@
+% Table II
+\begin{table}[htbp]
+  \centering
+  \caption{Table II}
+  \label{tab:table02_loss_comparison_rcs3}
+  \begin{tabular}{lccccc}
+    \toprule
+    Method & Event Precision & Event Recall & Event F1 & FAR / UAV·h & Mean Delay / s \\
+    \midrule
+    BCE & 0.886 ± 0.017 & 0.952 ± 0.003 & 0.918 ± 0.010 & 1.809 ± 0.297 & 3.352 ± 0.047 \\
+    Weighted BCE & 0.230 ± 0.021 & \textbf{0.952 ± 0.003} & 0.371 ± 0.027 & 47.237 ± 5.576 & \textbf{2.520 ± 0.068} \\
+    Binary Focal Loss & 0.895 ± 0.023 & 0.948 ± 0.001 & 0.920 ± 0.012 & 1.648 ± 0.402 & 3.374 ± 0.033 \\
+    Event-aligned Loss & \textbf{0.955 ± 0.006} & 0.944 ± 0.001 & \textbf{0.949 ± 0.003} & \textbf{0.649 ± 0.093} & 3.385 ± 0.018 \\
+    \bottomrule
+  \end{tabular}
+\end{table}

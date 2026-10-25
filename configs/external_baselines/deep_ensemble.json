@@ -1,0 +1,58 @@
+{
+  "pathloss": {
+    "packet_samples": 150,
+    "standard_model": "3gpp_tr_36_777_umi_av",
+    "reference_carrier_ghz": 2.0,
+    "min_distance_m": 1.0,
+    "min_altitude_m": 1.5
+  },
+  "feature_generation": {
+    "time_chunk_steps": 100
+  },
+  "training": {
+    "ensemble_scheme": "full_train_streaming_meta_mlp",
+    "seed": 20260714,
+    "device": "auto",
+    "max_train_samples": 1000000,
+    "max_validation_samples": 100000,
+    "decision_threshold": 0.5,
+    "mlp": {
+      "hidden_dims": [
+        10,
+        20,
+        10
+      ],
+      "learning_rate": 0.005,
+      "batch_size": 1024,
+      "epochs": 500,
+      "patience": 100,
+      "weight_decay": 0.0,
+      "seed": 20260714
+    },
+    "meta_mlp": {
+      "hidden_dim": 4,
+      "learning_rate": 0.005,
+      "batch_size": 8192,
+      "epochs": 500,
+      "patience": 100,
+      "weight_decay": 0.0,
+      "seed": 20260714
+    }
+  },
+  "evaluation": {
+    "confirmation_steps": 5,
+    "threshold_candidates": [
+      0.1,
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8,
+      0.9
+    ],
+    "threshold_selection_metric": "event_f1",
+    "bootstrap_samples": 1000
+  }
+}

@@ -1,0 +1,473 @@
+{
+  "schema_version": "1.0",
+  "dataset": "D:\\Codes\\project_spoofing_detect\\light_mappo\\isac_spoofing_detection\\data\\d1_2000_sharded",
+  "analysis_unit": "episode/event for inference; step-UAV values are descriptive only",
+  "integrity": {
+    "manifest_schema_version": "1.5",
+    "shards_loaded": 20,
+    "episodes_loaded": 2000,
+    "unique_episode_ids": 2000,
+    "duplicate_episode_ids": 0,
+    "shape_error_count": 0,
+    "label_cell_mismatch_count": 0,
+    "metadata_mismatch_count": 0,
+    "nonfinite_counts": {
+      "time_s": 0,
+      "true_position_m": 0,
+      "velocity_mps": 0,
+      "heading": 0,
+      "gps_clean_m": 0,
+      "gps_observed_m": 0,
+      "isac_position_m": 0,
+      "isac_range_m": 0,
+      "isac_los_unit": 0,
+      "isac_radial_velocity_mps": 0,
+      "isac_snr_db": 0,
+      "isac_range_variance": 0,
+      "isac_radial_velocity_variance": 0,
+      "isac_direction_variance": 0,
+      "features": 0
+    },
+    "array_value_counts": {
+      "time_s": 800000,
+      "true_position_m": 19200000,
+      "velocity_mps": 19200000,
+      "heading": 19200000,
+      "gps_clean_m": 19200000,
+      "gps_observed_m": 19200000,
+      "isac_position_m": 19200000,
+      "isac_range_m": 25600000,
+      "isac_los_unit": 76800000,
+      "isac_radial_velocity_mps": 25600000,
+      "isac_snr_db": 25600000,
+      "isac_range_variance": 25600000,
+      "isac_radial_velocity_variance": 25600000,
+      "isac_direction_variance": 25600000,
+      "features": 96000000
+    },
+    "invalid_isac_links": 0,
+    "total_isac_links": 25600000,
+    "max_abs_clean_gps_minus_true_position_m": 0.0,
+    "isac_snr_db_min": 10.240792274475098,
+    "isac_snr_db_max": 103.83610534667969
+  },
+  "scenario_counts_by_split": {
+    "train": {
+      "stealth": 350,
+      "clean": 350,
+      "random": 350,
+      "replay": 350
+    },
+    "validation": {
+      "replay": 75,
+      "random": 75,
+      "clean": 75,
+      "stealth": 75
+    },
+    "test": {
+      "replay": 75,
+      "stealth": 75,
+      "random": 75,
+      "clean": 75
+    }
+  },
+  "attack_events": 1500,
+  "attacked_uav_events": 6680,
+  "truncation": {
+    "successes": 442,
+    "observations": 1500,
+    "proportion": 0.2946666666666667,
+    "ci_low": 0.27214375901157345,
+    "ci_high": 0.3182385938708478
+  },
+  "onset_during_feature_warmup": {
+    "successes": 89,
+    "observations": 1500,
+    "proportion": 0.059333333333333335,
+    "ci_low": 0.04846576891093947,
+    "ci_high": 0.07245220269711383
+  },
+  "actual_duration_shorter_than_k_steps": {
+    "1": {
+      "successes": 0,
+      "observations": 1500,
+      "proportion": 0.0,
+      "ci_low": 0.0,
+      "ci_high": 0.0025544307201814894
+    },
+    "2": {
+      "successes": 8,
+      "observations": 1500,
+      "proportion": 0.005333333333333333,
+      "ci_low": 0.0027049287623018017,
+      "ci_high": 0.010488921363531085
+    },
+    "3": {
+      "successes": 17,
+      "observations": 1500,
+      "proportion": 0.011333333333333334,
+      "ci_low": 0.0070879404744169,
+      "ci_high": 0.018075256482773815
+    },
+    "5": {
+      "successes": 23,
+      "observations": 1500,
+      "proportion": 0.015333333333333332,
+      "ci_low": 0.010238914878614596,
+      "ci_high": 0.022903846632814657
+    },
+    "24": {
+      "successes": 91,
+      "observations": 1500,
+      "proportion": 0.06066666666666667,
+      "ci_low": 0.04967170257629274,
+      "ci_high": 0.0739061238831734
+    }
+  },
+  "attacked_uav_events_shorter_than_k_steps": {
+    "1": 0,
+    "2": 39,
+    "3": 84,
+    "5": 114,
+    "24": 440
+  },
+  "zero_observable_gps_attack_events": 3,
+  "zero_observable_gps_attacked_uav_events": 14,
+  "stealth_onset_zero_perturbation_step_uav_labels": 2154,
+  "actual_duration_steps": {
+    "n": 1500,
+    "mean": 101.5,
+    "sd": 37.82947765415736,
+    "ci_low": 99.58405246198751,
+    "ci_high": 103.41594753801249,
+    "median": 107.0,
+    "p05": 19.0,
+    "p95": 154.0,
+    "min": 1.0,
+    "max": 160.0
+  },
+  "isac_localization_error_mean_m": {
+    "n": 2000,
+    "mean": 1.0887808169126512,
+    "sd": 0.13301899437487005,
+    "ci_low": 1.0829475776651658,
+    "ci_high": 1.0946140561601365,
+    "median": 1.1387815475463867,
+    "p05": 0.8300551116466522,
+    "p95": 1.2263443350791932,
+    "min": 0.8069407939910889,
+    "max": 1.2652943134307861
+  },
+  "statistical_tests": [
+    {
+      "test": "attack onset over ten equal time bins",
+      "method": "chi-square goodness-of-fit",
+      "statistic": 7.493333333333333,
+      "degrees_of_freedom": 9,
+      "p_value": 0.5858970850862781,
+      "effect_size_cohen_w": 0.07067924416372572,
+      "observed": [
+        144,
+        152,
+        159,
+        140,
+        153,
+        156,
+        138,
+        170,
+        133,
+        155
+      ],
+      "expected_each": 150.0,
+      "p_value_holm": 1.0,
+      "p_value_adjustment_family": "six randomisation audits"
+    },
+    {
+      "test": "target UAV count over 1..8",
+      "method": "chi-square goodness-of-fit",
+      "statistic": 2.9866666666666664,
+      "degrees_of_freedom": 7,
+      "p_value": 0.8862329272136721,
+      "effect_size_cohen_w": 0.04462186808181736,
+      "observed": [
+        197,
+        186,
+        181,
+        195,
+        191,
+        197,
+        173,
+        180
+      ],
+      "expected_each": 187.5,
+      "p_value_holm": 1.0,
+      "p_value_adjustment_family": "six randomisation audits"
+    },
+    {
+      "test": "severity level over weak/medium/strong",
+      "method": "chi-square goodness-of-fit",
+      "statistic": 1.6480000000000001,
+      "degrees_of_freedom": 2,
+      "p_value": 0.4386734466479678,
+      "effect_size_cohen_w": 0.033146141052416145,
+      "observed": [
+        518,
+        478,
+        504
+      ],
+      "expected_each": 500.0,
+      "p_value_holm": 1.0,
+      "p_value_adjustment_family": "six randomisation audits"
+    },
+    {
+      "test": "attack type versus onset bin",
+      "method": "chi-square independence",
+      "statistic": 18.795174502082016,
+      "degrees_of_freedom": 18,
+      "p_value": 0.4045372109962786,
+      "effect_size_cramers_v": 0.0791521204223909,
+      "minimum_expected_count": 44.333333333333336,
+      "table": [
+        [
+          47,
+          39,
+          55,
+          53,
+          50,
+          53,
+          45,
+          60,
+          41,
+          57
+        ],
+        [
+          50,
+          49,
+          44,
+          48,
+          59,
+          55,
+          49,
+          55,
+          50,
+          41
+        ],
+        [
+          47,
+          64,
+          60,
+          39,
+          44,
+          48,
+          44,
+          55,
+          42,
+          57
+        ]
+      ],
+      "p_value_holm": 1.0,
+      "p_value_adjustment_family": "six randomisation audits"
+    },
+    {
+      "test": "onset bin versus initial S-curve phase",
+      "method": "chi-square independence",
+      "statistic": 46.888028972557535,
+      "degrees_of_freedom": 36,
+      "p_value": 0.10572641246886405,
+      "effect_size_cramers_v": 0.08840063062798961,
+      "minimum_expected_count": 26.6,
+      "table": [
+        [
+          26,
+          34,
+          29,
+          26,
+          29
+        ],
+        [
+          30,
+          34,
+          19,
+          36,
+          33
+        ],
+        [
+          28,
+          26,
+          41,
+          35,
+          29
+        ],
+        [
+          41,
+          23,
+          25,
+          25,
+          26
+        ],
+        [
+          35,
+          30,
+          27,
+          31,
+          30
+        ],
+        [
+          28,
+          36,
+          31,
+          21,
+          40
+        ],
+        [
+          28,
+          29,
+          30,
+          32,
+          19
+        ],
+        [
+          39,
+          31,
+          38,
+          28,
+          34
+        ],
+        [
+          13,
+          29,
+          35,
+          29,
+          27
+        ],
+        [
+          32,
+          28,
+          25,
+          37,
+          33
+        ]
+      ],
+      "p_value_holm": 0.6343584748131843,
+      "p_value_adjustment_family": "six randomisation audits"
+    },
+    {
+      "test": "onset bin versus attack S-curve phase",
+      "method": "chi-square independence",
+      "statistic": 40.69085475410336,
+      "degrees_of_freedom": 36,
+      "p_value": 0.27148099751381344,
+      "effect_size_cramers_v": 0.08235174027113146,
+      "minimum_expected_count": 26.6,
+      "table": [
+        [
+          25,
+          36,
+          25,
+          26,
+          32
+        ],
+        [
+          34,
+          26,
+          32,
+          28,
+          32
+        ],
+        [
+          29,
+          28,
+          26,
+          41,
+          35
+        ],
+        [
+          27,
+          38,
+          28,
+          20,
+          27
+        ],
+        [
+          32,
+          28,
+          35,
+          32,
+          26
+        ],
+        [
+          20,
+          42,
+          31,
+          32,
+          31
+        ],
+        [
+          27,
+          28,
+          24,
+          26,
+          33
+        ],
+        [
+          36,
+          30,
+          35,
+          40,
+          29
+        ],
+        [
+          35,
+          24,
+          26,
+          20,
+          28
+        ],
+        [
+          35,
+          20,
+          38,
+          35,
+          27
+        ]
+      ],
+      "p_value_holm": 1.0,
+      "p_value_adjustment_family": "six randomisation audits"
+    },
+    {
+      "test": "ISAC localization error across scenarios",
+      "method": "Kruskal-Wallis",
+      "statistic": 0.7821093840674274,
+      "degrees_of_freedom": 3,
+      "p_value": 0.853741271804688,
+      "effect_size_epsilon_squared": 0.0,
+      "group_episode_counts": [
+        500,
+        500,
+        500,
+        500
+      ]
+    }
+  ],
+  "feature_signal_tests_significant_after_bh": 44,
+  "feature_signal_tests_total": 45,
+  "recovery_tests_significant_after_bh": 12,
+  "recovery_tests_total": 45,
+  "recovery_eligible_episodes": 884,
+  "train_feature_std_min": 0.6471581504944592,
+  "train_feature_std_max": 734.8711876200549,
+  "features_with_values_above_100_train_sd": 9,
+  "largest_train_max_standardized": 661.7030740158834,
+  "largest_train_abs_z_gt_10_proportion": 0.001166294642857143,
+  "feature_quantiles_are_approximate": true,
+  "feature_quantile_sample_rows_per_shard": 10000,
+  "runtime": {
+    "python": "3.9.13 (main, Aug 25 2022, 23:51:50) [MSC v.1916 64 bit (AMD64)]",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "numpy": "1.26.4",
+    "pandas": "1.2.4",
+    "scipy": "1.9.1",
+    "statsmodels": "0.13.2",
+    "numpy_scipy_compatibility_warning": true
+  }
+}

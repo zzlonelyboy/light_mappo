@@ -1,0 +1,489 @@
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from dataclasses import replace
+import json
+import multiprocessing as mp
+from pathlib import Path
+import platform
+import sys
+
+import numpy as np
+
+from isac_spoofing.config import load_config
+from isac_spoofing.data import save_episode_shard
+from isac_spoofing.environment import ISACSpoofingEnvironment
+from isac_spoofing.features import feature_names_for_neighbor_mode
+from isac_spoofing.types import EpisodeData
+
+
+SCENARIO_TYPES: tuple[str, ...] = ("clean", "random", "replay", "stealth")
+TRAIN_FRACTION = 0.80
+VALIDATION_FRACTION = 0.10
+TEST_FRACTION = 0.10
+VALIDATION_END_FRACTION = TRAIN_FRACTION + VALIDATION_FRACTION
+SPLIT_POLICY = "episode-level 80/10/10"
+TEST_ONLY_SPLIT_POLICY = "test-only"
+SPLIT_MODES = ("standard", "test-only")
+STRENGTH_UNITS: dict[str, str] = {
+    "random": "m",
+    "replay": "s",
+    "stealth": "m/s",
+}
+
+
+_WORKER_ENVIRONMENT: ISACSpoofingEnvironment | None = None
+
+
+def _initialize_episode_worker(config_path: str | None) -> None:
+    """Create one reusable simulator inside each worker process."""
+    global _WORKER_ENVIRONMENT
+    path = None if config_path is None else Path(config_path)
+    _WORKER_ENVIRONMENT = ISACSpoofingEnvironment(load_config(path))
+
+
+def _run_episode_worker(
+    task: tuple[int, int, str, str],
+) -> tuple[int, EpisodeData]:
+    """Generate one deterministic episode for ordered multiprocessing."""
+    if _WORKER_ENVIRONMENT is None:
+        raise RuntimeError("episode worker was not initialized")
+    index, seed, trajectory_type, attack_type = task
+    episode = _WORKER_ENVIRONMENT.run_episode(
+        seed=seed,
+        trajectory_type=trajectory_type,
+        attack_type=attack_type,
+    )
+    return index, episode
+
+
+def _split(index: int, total: int, split_mode: str = "standard") -> str:
+    if split_mode == "test-only":
+        return "test"
+    if split_mode != "standard":
+        raise ValueError(f"unsupported split mode: {split_mode!r}")
+    fraction = (index + 0.5) / max(total, 1)
+    if fraction < TRAIN_FRACTION:
+        return "train"
+    if fraction < VALIDATION_END_FRACTION:
+        return "validation"
+    return "test"
+
+
+def _balanced_scenario_schedule(
+    count: int,
+    rng: np.random.Generator,
+    remainder_offset: int = 0,
+) -> tuple[list[str], int]:
+    """Return a shuffled four-scenario schedule with counts differing by at most one.
+
+    The remainder offset is carried across data splits, so the complete dataset
+    is also balanced when individual split sizes are not divisible by four.
+    """
+    if count < 0:
+        raise ValueError("count must be non-negative")
+    quotient, remainder = divmod(count, len(SCENARIO_TYPES))
+    schedule = list(SCENARIO_TYPES) * quotient
+    schedule.extend(
+        SCENARIO_TYPES[(remainder_offset + index) % len(SCENARIO_TYPES)]
+        for index in range(remainder)
+    )
+    rng.shuffle(schedule)
+    next_offset = (remainder_offset + remainder) % len(SCENARIO_TYPES)
+    return schedule, next_offset
+
+
+def _scenario_assignment(total: int, seed: int) -> dict[int, str]:
+    """Assign balanced scenarios within train/validation/test episode groups."""
+    split_indices: dict[str, list[int]] = {
+        "train": [],
+        "validation": [],
+        "test": [],
+    }
+    for index in range(total):
+        split_indices[_split(index, total)].append(index)
+
+    rng = np.random.default_rng(int(seed))
+    assignment: dict[int, str] = {}
+    remainder_offset = 0
+    for split in ("train", "validation", "test"):
+        indices = split_indices[split]
+        schedule, remainder_offset = _balanced_scenario_schedule(
+            len(indices), rng, remainder_offset
+        )
+        assignment.update(zip(indices, schedule))
+    return assignment
+
+
+def _experiment_assignment(
+    total: int,
+    seed: int,
+    trajectory_types: tuple[str, ...],
+    split_mode: str = "standard",
+) -> dict[int, tuple[str, str]]:
+    """Balance scenario/trajectory pairs independently inside every split."""
+    if not trajectory_types:
+        raise ValueError("trajectory_types must not be empty")
+    ordered_pairs = [
+        (scenario, trajectory_types[(scenario_index + shift) % len(trajectory_types)])
+        for shift in range(len(trajectory_types))
+        for scenario_index, scenario in enumerate(SCENARIO_TYPES)
+    ]
+    split_indices: dict[str, list[int]] = {
+        "train": [],
+        "validation": [],
+        "test": [],
+    }
+    for index in range(total):
+        split_indices[_split(index, total, split_mode=split_mode)].append(index)
+
+    rng = np.random.default_rng(int(seed))
+    assignment: dict[int, tuple[str, str]] = {}
+    remainder_offset = 0
+    for split in ("train", "validation", "test"):
+        indices = split_indices[split]
+        quotient, remainder = divmod(len(indices), len(ordered_pairs))
+        schedule = ordered_pairs * quotient
+        schedule.extend(
+            ordered_pairs[(remainder_offset + index) % len(ordered_pairs)]
+            for index in range(remainder)
+        )
+        remainder_offset = (remainder_offset + remainder) % len(ordered_pairs)
+        rng.shuffle(schedule)
+        assignment.update(zip(indices, schedule))
+    return assignment
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate episode-level ISAC/GPS spoofing data"
+    )
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--output", type=Path, default=Path("data/raw"))
+    parser.add_argument("--episodes", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=20260716)
+    parser.add_argument("--episodes-per-shard", type=int, default=100)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of episode-generation processes. Results are consumed in "
+            "episode-index order, so seeds, split assignment, and shard order "
+            "remain deterministic."
+        ),
+    )
+    parser.add_argument(
+        "--split-mode",
+        choices=SPLIT_MODES,
+        default="standard",
+        help=(
+            "Use 'standard' for the original episode-level 80/10/10 split, or "
+            "'test-only' to write every episode to the test split."
+        ),
+    )
+    args = parser.parse_args()
+    if args.episodes < 1:
+        parser.error("--episodes must be positive")
+    if args.episodes_per_shard < 1:
+        parser.error("--episodes-per-shard must be positive")
+    if args.workers < 1:
+        parser.error("--workers must be positive")
+
+    config = load_config(args.config)
+    feature_names = feature_names_for_neighbor_mode(
+        config.features.neighbor_feature_mode
+    )
+    if set(config.attack.attack_types) != {"random", "replay", "stealth"}:
+        parser.error(
+            "balanced collection requires attack_types to contain random, replay, and stealth"
+        )
+    experiment_assignment = _experiment_assignment(
+        args.episodes,
+        args.seed,
+        config.simulation.trajectory_types,
+        split_mode=args.split_mode,
+    )
+    split_policy = (
+        TEST_ONLY_SPLIT_POLICY if args.split_mode == "test-only" else SPLIT_POLICY
+    )
+    sampling_policy = (
+        "balanced scenario/trajectory pairs in test-only dataset"
+        if args.split_mode == "test-only"
+        else "balanced scenario/trajectory pairs within each split"
+    )
+    episode_sampling_policy = (
+        "balanced_scenario_trajectory_pairs_test_only"
+        if args.split_mode == "test-only"
+        else "balanced_scenario_trajectory_pairs_by_split"
+    )
+    attack_counts: Counter[str] = Counter()
+    trajectory_counts: Counter[str] = Counter()
+    pair_counts: Counter[str] = Counter()
+    truncation_counts: Counter[str] = Counter()
+    severity_counts: Counter[str] = Counter()
+    severity_by_attack_counts: dict[str, Counter[str]] = {
+        attack_type: Counter() for attack_type in STRENGTH_UNITS
+    }
+    sampled_strengths: dict[str, list[float]] = {
+        attack_type: [] for attack_type in STRENGTH_UNITS
+    }
+    nominal_duration_steps: list[int] = []
+    actual_duration_steps: list[int] = []
+    split_attack_counts: dict[str, Counter[str]] = {
+        "train": Counter(),
+        "validation": Counter(),
+        "test": Counter(),
+    }
+    split_severity_counts: dict[str, dict[str, Counter[str]]] = {
+        split: {
+            attack_type: Counter() for attack_type in STRENGTH_UNITS
+        }
+        for split in ("train", "validation", "test")
+    }
+    episode_buffers: dict[str, list[EpisodeData]] = {
+        "train": [],
+        "validation": [],
+        "test": [],
+    }
+    shard_episode_counts: dict[str, list[int]] = {
+        "train": [],
+        "validation": [],
+        "test": [],
+    }
+
+    def flush_shard(split: str) -> None:
+        buffer = episode_buffers[split]
+        if not buffer:
+            return
+        shard_index = len(shard_episode_counts[split])
+        shard_id = f"shard_{shard_index:05d}"
+        save_episode_shard(buffer, args.output / split, shard_id)
+        shard_episode_counts[split].append(len(buffer))
+        buffer.clear()
+
+    tasks = [
+        (
+            index,
+            args.seed + index,
+            experiment_assignment[index][1],
+            experiment_assignment[index][0],
+        )
+        for index in range(args.episodes)
+    ]
+
+    def consume_episode(index: int, episode: EpisodeData) -> None:
+        seed = args.seed + index
+        split = _split(index, args.episodes, split_mode=args.split_mode)
+        requested_scenario, requested_trajectory = experiment_assignment[index]
+        episode_id = f"episode_{index:05d}_seed_{seed}"
+        episode = replace(
+            episode,
+            metadata={
+                **episode.metadata,
+                "episode_id": episode_id,
+                "split": split,
+                "sampling_policy": episode_sampling_policy,
+                "attack_strength_sampling_policy": (
+                    "uniform_severity_then_uniform_within_interval_event_fixed"
+                ),
+                "attack_boundary_policy": "complete_event_within_episode",
+            },
+        )
+        episode_buffers[split].append(episode)
+        if len(episode_buffers[split]) >= args.episodes_per_shard:
+            flush_shard(split)
+        attack_type = str(episode.metadata["attack"]["attack_type"])
+        trajectory_type = str(episode.metadata["trajectory_type"])
+        if attack_type != requested_scenario or trajectory_type != requested_trajectory:
+            raise RuntimeError(
+                "generated episode does not match its scheduled assignment: "
+                f"episode={episode_id}, expected=({requested_scenario}, "
+                f"{requested_trajectory}), actual=({attack_type}, {trajectory_type})"
+            )
+        attack_counts[attack_type] += 1
+        trajectory_counts[trajectory_type] += 1
+        pair_counts[f"{attack_type}:{trajectory_type}"] += 1
+        split_attack_counts[split][attack_type] += 1
+        if attack_type != "clean":
+            attack_metadata = episode.metadata["attack"]
+            attack_parameters = attack_metadata["parameters"]
+            start_step = int(attack_metadata["start_step"])
+            end_step = int(attack_metadata["end_step"])
+            nominal_duration = int(attack_metadata["nominal_duration_steps"])
+            actual_duration = int(attack_metadata["actual_duration_steps"])
+            if (
+                bool(attack_metadata["was_truncated"])
+                or actual_duration != nominal_duration
+                or end_step - start_step != nominal_duration
+                or end_step > config.simulation.num_steps
+            ):
+                raise RuntimeError(
+                    "complete-event generation invariant failed for "
+                    f"{episode_id}: {attack_metadata!r}"
+                )
+            severity_level = str(attack_parameters["severity_level"])
+            strength_value = float(attack_parameters["strength_value"])
+            severity_counts[severity_level] += 1
+            severity_by_attack_counts[attack_type][severity_level] += 1
+            split_severity_counts[split][attack_type][severity_level] += 1
+            sampled_strengths[attack_type].append(strength_value)
+            truncation_counts[
+                "truncated" if bool(attack_metadata["was_truncated"]) else "complete"
+            ] += 1
+            nominal_duration_steps.append(nominal_duration)
+            actual_duration_steps.append(actual_duration)
+
+        completed = index + 1
+        if completed == args.episodes or completed % 100 == 0:
+            print(
+                f"generated {completed}/{args.episodes} episodes "
+                f"with {args.workers} worker(s)",
+                flush=True,
+            )
+
+    if args.workers == 1:
+        environment = ISACSpoofingEnvironment(config)
+        for index, seed, trajectory_type, attack_type in tasks:
+            episode = environment.run_episode(
+                seed=seed,
+                trajectory_type=trajectory_type,
+                attack_type=attack_type,
+            )
+            consume_episode(index, episode)
+    else:
+        config_path = None if args.config is None else str(args.config.resolve())
+        context = mp.get_context("spawn")
+        pool = context.Pool(
+            processes=args.workers,
+            initializer=_initialize_episode_worker,
+            initargs=(config_path,),
+        )
+        try:
+            for expected_index, result in enumerate(
+                pool.imap(_run_episode_worker, tasks, chunksize=1)
+            ):
+                index, episode = result
+                if index != expected_index:
+                    raise RuntimeError(
+                        "parallel generator returned episodes out of order: "
+                        f"expected {expected_index}, got {index}"
+                    )
+                consume_episode(index, episode)
+        except BaseException:
+            pool.terminate()
+            pool.join()
+            raise
+        else:
+            pool.close()
+            pool.join()
+
+    for split in ("train", "validation", "test"):
+        flush_shard(split)
+    args.output.mkdir(parents=True, exist_ok=True)
+    strength_summary = {
+        attack_type: {
+            "unit": STRENGTH_UNITS[attack_type],
+            "count": len(values),
+            "observed_min": min(values, default=None),
+            "observed_max": max(values, default=None),
+            "observed_mean": float(np.mean(values)) if values else None,
+        }
+        for attack_type, values in sampled_strengths.items()
+    }
+    manifest = {
+        "schema_version": "1.6",
+        "episodes": args.episodes,
+        "base_seed": args.seed,
+        "feature_dim": len(feature_names),
+        "feature_names": list(feature_names),
+        "storage": {
+            "format": "npz_episode_shards",
+            "episode_axis": 0,
+            "episodes_per_shard": args.episodes_per_shard,
+            "total_shards": sum(
+                len(counts) for counts in shard_episode_counts.values()
+            ),
+            "shard_counts_by_split": {
+                split: len(counts)
+                for split, counts in shard_episode_counts.items()
+            },
+            "episodes_in_shards_by_split": shard_episode_counts,
+        },
+        "split_policy": split_policy,
+        "sampling_policy": sampling_policy,
+        "scenario_counts": dict(attack_counts),
+        "scenario_counts_by_split": {
+            split: {
+                scenario: counts[scenario]
+                for scenario in SCENARIO_TYPES
+            }
+            for split, counts in split_attack_counts.items()
+        },
+        "trajectory_counts": dict(trajectory_counts),
+        "scenario_trajectory_counts": dict(pair_counts),
+        "attack_strength_sampling_policy": (
+            "uniform severity level, then uniform continuous strength within "
+            "the matching interval; one fixed strength per event"
+        ),
+        "attack_boundary_policy": (
+            "sample duration first, then sample onset uniformly from the feasible "
+            "range so every attack event is complete within its episode"
+        ),
+        "attack_severity_counts": {
+            level: severity_counts[level]
+            for level in config.attack.severity_levels
+        },
+        "attack_severity_counts_by_type": {
+            attack_type: {
+                level: counts[level]
+                for level in config.attack.severity_levels
+            }
+            for attack_type, counts in severity_by_attack_counts.items()
+        },
+        "attack_severity_counts_by_split": {
+            split: {
+                attack_type: {
+                    level: counts[level]
+                    for level in config.attack.severity_levels
+                }
+                for attack_type, counts in attack_counts_by_type.items()
+            }
+            for split, attack_counts_by_type in split_severity_counts.items()
+        },
+        "sampled_attack_strength_summary": strength_summary,
+        "attack_truncation_counts": dict(truncation_counts),
+        "attack_duration_steps": {
+            "nominal_min": min(nominal_duration_steps, default=None),
+            "nominal_max": max(nominal_duration_steps, default=None),
+            "actual_min": min(actual_duration_steps, default=None),
+            "actual_max": max(actual_duration_steps, default=None),
+        },
+        "config": config.to_dict(),
+        "runtime": {
+            "python": sys.version,
+            "numpy": np.__version__,
+            "platform": platform.platform(),
+            "generation_workers": args.workers,
+            "parallel_ordering": "ordered_by_episode_index",
+        },
+    }
+    with (args.output / "manifest.json").open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+    print(f"generated {args.episodes} episodes in {args.output.resolve()}")
+    print(f"scenario distribution: {dict(attack_counts)}")
+    print(f"trajectory distribution: {dict(trajectory_counts)}")
+    print(f"attack severity distribution: {dict(severity_counts)}")
+    print(
+        "shard distribution: "
+        f"{ {split: len(counts) for split, counts in shard_episode_counts.items()} }"
+    )
+    print(
+        "scenario distribution by split: "
+        f"{ {split: dict(counts) for split, counts in split_attack_counts.items()} }"
+    )
+
+
+if __name__ == "__main__":
+    main()
