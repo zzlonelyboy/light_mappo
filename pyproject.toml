@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "isac-spoofing-detection"
 version = "0.1.0"
-description = "Action-free numerical simulation for online GPS spoofing event detection with ISAC assistance"
+description = "CRB-based ISAC measurements and GPS spoofing detection with closed-loop navigation"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 

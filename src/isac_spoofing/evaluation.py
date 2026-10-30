@@ -10,6 +10,7 @@ import numpy as np
 from .learning_data import load_split
 from .metrics import (
     aggregate_event_results,
+    alarm_availability_offset_steps,
     attack_events_from_arrays,
     binary_detection_metrics,
     k_step_alarm_events,
@@ -17,6 +18,8 @@ from .metrics import (
 )
 from .training import (
     ATTACK_PROBABILITY_THRESHOLD,
+    DetectorBundle,
+    attack_probabilities_from_logits,
     load_trained_detector,
     predict_episode,
 )
@@ -86,8 +89,8 @@ def evaluate_split(
 ) -> dict[str, object]:
     """Run frozen inference, K-step alarms, first-alarm event matching, and aggregation."""
 
-    if not 1 <= confirmation_steps <= 5:
-        raise ValueError("confirmation_steps must lie in [1, 5]")
+    if isinstance(confirmation_steps, bool) or not isinstance(confirmation_steps, int) or confirmation_steps < 1:
+        raise ValueError("confirmation_steps must be a positive integer")
     manifest = load_dataset_manifest(data_root)
     bundle = load_trained_detector(checkpoint_path, requested_device=device)
     checkpoint_warmup = bundle.checkpoint.get("monitoring_warmup_steps")
@@ -126,6 +129,7 @@ def evaluate_split(
             num_steps=episode.num_steps,
             dt_s=resolved_dt,
             warmup_steps=resolved_warmup,
+            alarm_availability_offset_steps=alarm_availability_offset_steps(episode.metadata),
         )
         event_result.update(
             {
@@ -177,6 +181,7 @@ def evaluate_split(
         "confirmation_steps": int(confirmation_steps),
         "warmup_steps": resolved_warmup,
         "dt_s": resolved_dt,
+        "alarm_timing_policy": "per-episode measurement_timing; legacy absence means slot-index time",
         "output_mode": str(
             bundle.checkpoint["model_config"].get(
                 "output_mode", "legacy_two_class_logits"
@@ -209,3 +214,103 @@ def json_ready(value: Any) -> Any:
     """Public JSON conversion for experiment entry points."""
 
     return _json_ready(value)
+
+
+def checkpoint_domain_status(
+    bundle: DetectorBundle,
+    model_config: dict[str, Any],
+    allow_domain_shift: bool = False,
+) -> dict[str, object]:
+    """Check physical-model provenance separately from feature dimensions."""
+    checkpoint = bundle.checkpoint
+    reasons: list[str] = []
+    if not str(checkpoint.get("source_dataset_schema_version", "")).startswith("3."):
+        reasons.append("checkpoint was not trained on the current schema-3 measurement model")
+    timing = checkpoint.get("measurement_timing")
+    if not isinstance(timing, dict) or timing.get("alarm_availability_offset_steps") != 1:
+        reasons.append("checkpoint does not record slot-end measurement timing")
+    source_config = checkpoint.get("source_model_config")
+    if not isinstance(source_config, dict) or not source_config:
+        reasons.append("checkpoint is missing its source physical configuration")
+    else:
+        for group in ("isac", "gps", "features"):
+            if _json_ready(source_config.get(group)) != _json_ready(model_config.get(group)):
+                reasons.append(f"{group} configuration differs from checkpoint training")
+        source_simulation = source_config.get("simulation", {})
+        target_simulation = model_config.get("simulation", {})
+        for key in ("dt_s", "num_uavs"):
+            if source_simulation.get(key) != target_simulation.get(key):
+                reasons.append(f"simulation.{key} differs from checkpoint training")
+        for key in ("enabled", "position_gain_xy_s_inv", "position_gain_z_s_inv", "max_speed_mps"):
+            if source_config.get("navigation", {}).get(key) != model_config.get("navigation", {}).get(key):
+                reasons.append(f"navigation.{key} differs from checkpoint training")
+    if reasons and not allow_domain_shift:
+        raise ValueError(
+            "Checkpoint cannot be treated as trained for the current model: "
+            + "; ".join(reasons)
+            + ". Retrain on new data, or explicitly allow an unvalidated domain-shift evaluation."
+        )
+    return {
+        "status": "unvalidated_domain_shift" if reasons else "source_model_metadata_match",
+        "reasons": reasons,
+        "performance_validated": False,
+    }
+
+
+class StreamingDetector:
+    """Frozen MLP/GRU inference receiving detector features only.
+
+    GRU state persists between calls within one episode. There is no access to
+    positions, attack labels, or other simulator audit arrays.
+    """
+
+    def __init__(
+        self,
+        bundle: DetectorBundle,
+        feature_names: tuple[str, ...],
+        model_config: dict[str, Any],
+        allow_domain_shift: bool = False,
+    ):
+        self.bundle = bundle
+        self.domain_status = checkpoint_domain_status(
+            bundle, model_config, allow_domain_shift=allow_domain_shift
+        )
+        available = tuple(feature_names)
+        if len(set(available)) != len(available):
+            raise ValueError("available feature names must be unique")
+        missing = set(bundle.standardizer.feature_names) - set(available)
+        if missing:
+            raise ValueError(f"environment lacks checkpoint features: {sorted(missing)}")
+        self._indices = [available.index(name) for name in bundle.standardizer.feature_names]
+        self._input_dimension = len(available)
+        self.reset()
+
+    def reset(self) -> None:
+        self._hidden = None
+        self._num_uavs: int | None = None
+        self.probabilities: list[np.ndarray] = []
+
+    def __call__(self, features: np.ndarray) -> np.ndarray:
+        import torch
+
+        values = np.asarray(features, dtype=np.float32)
+        if values.ndim != 2 or values.shape[1] != self._input_dimension:
+            raise ValueError(f"streaming features must have shape (N,{self._input_dimension})")
+        if self._num_uavs is not None and values.shape[0] != self._num_uavs:
+            raise ValueError("UAV count changed without resetting detector state")
+        self._num_uavs = values.shape[0]
+        normalized = self.bundle.standardizer.transform(values[:, self._indices])
+        tensor = torch.as_tensor(normalized, device=self.bundle.device)
+        with torch.no_grad():
+            if self.bundle.checkpoint["model_type"] == "gru":
+                model = self.bundle.model
+                encoded = model.input_encoder(tensor.unsqueeze(1))
+                sequence_output, hidden = model.gru(encoded, self._hidden)
+                self._hidden = hidden.detach()
+                logits = model.classifier(sequence_output[:, 0, :])
+            else:
+                logits = self.bundle.model(tensor)
+            probability = attack_probabilities_from_logits(logits)
+        result = probability.cpu().numpy().astype(np.float32, copy=True)
+        self.probabilities.append(result.copy())
+        return result

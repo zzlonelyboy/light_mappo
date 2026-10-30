@@ -132,7 +132,7 @@ def test_no_nan_inf():
     labels, _ = _make_labels_and_logits()
     for gamma in [0.0, 0.5, 1.0, 2.0, 3.0, 5.0]:
         for alpha in [None, 0.25, 0.5, 0.75, 0.9]:
-            logits = torch.randn(4, 50, 1) * 3.0  # random logits
+            logits = torch.randn(labels.shape[0], 50, 1) * 3.0  # aligned batch size
             loss = _binary_focal_loss(logits, labels[:, :50], gamma=gamma, alpha=alpha)
             val = float(loss.item())
             assert math.isfinite(val), f"γ={gamma} α={alpha}: loss={val}"

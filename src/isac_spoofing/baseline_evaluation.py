@@ -7,6 +7,7 @@ import numpy as np
 
 from .metrics import (
     aggregate_event_results,
+    alarm_availability_offset_steps,
     attack_events_from_arrays,
     binary_detection_metrics,
     k_step_alarm_events,
@@ -64,6 +65,7 @@ def evaluate_episode_predictions(
         num_steps=episode.num_steps,
         dt_s=config.dt_s,
         warmup_steps=config.warmup_steps,
+        alarm_availability_offset_steps=alarm_availability_offset_steps(episode.metadata),
     )
     attack_metadata = episode.metadata.get("attack", {})
     scenario = (

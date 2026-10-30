@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from .config import FeatureConfig
+from .config import FeatureConfig, ISACConfig
 from .isac import ISACMeasurementModel, unit
 from .localization import RangeDirectionLocalizer
 from .types import ISACMeasurement, InterUAVMeasurement
@@ -361,13 +361,14 @@ def estimate_gps_isac_error_precision(
     *,
     isac_model: ISACMeasurementModel,
     gps_noise_std_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    reported_covariance: np.ndarray | None = None,
 ) -> np.ndarray:
     """Estimate per-UAV GPS--ISAC error precision from detector-visible data.
 
     The inputs have shape ``(..., num_uavs, num_bs)`` and
     ``(..., num_uavs, num_bs, 3)``.  SNR and measurement variances are
-    reconstructed from measured ranges; simulator truth-derived SNR/variance
-    fields are deliberately not accepted by this interface.
+    obtained from the front-end quality report, not reconstructed from range.
+    Simulator generation covariances are not accepted as a replacement report.
     """
 
     ranges = np.abs(np.asarray(measured_range_m, dtype=np.float64))
@@ -383,22 +384,37 @@ def estimate_gps_isac_error_precision(
         raise ValueError("measured LoS directions must be finite and non-zero")
     directions = directions / direction_norm
 
-    range_variance, _, direction_variance, _ = (
-        isac_model.variances_from_range(ranges)
+    if reported_covariance is None:
+        raise ValueError("error precision requires reported distance/angle covariance")
+    covariance = np.asarray(reported_covariance, dtype=np.float64)
+    if covariance.shape == ranges.shape + (4, 4):
+        covariance = covariance[..., :3, :3]
+    if covariance.shape != ranges.shape + (3, 3):
+        raise ValueError("reported covariance shape must match range/angle observations")
+    delta = -ranges[..., None] * directions
+    x, y, z = np.moveaxis(delta, -1, 0)
+    horizontal_squared = x * x + y * y
+    horizontal = np.sqrt(horizontal_squared)
+    if np.any(ranges <= 0.0) or np.any(horizontal <= 0.0):
+        raise ValueError("reported geometry is singular at zero range or zenith")
+    jacobian = np.stack(
+        [
+            -directions,
+            np.stack([-y / horizontal_squared, x / horizontal_squared,
+                      np.zeros_like(x)], axis=-1),
+            np.stack([-x * z / (ranges * ranges * horizontal),
+                      -y * z / (ranges * ranges * horizontal),
+                      horizontal / (ranges * ranges)], axis=-1),
+        ], axis=-2,
     )
-    identity = np.eye(3, dtype=np.float64)
-    precision = np.zeros(ranges.shape[:-1] + (3, 3), dtype=np.float64)
-    for anchor_index in range(ranges.shape[-1]):
-        los = directions[..., anchor_index, :]
-        longitudinal = los[..., :, None] * los[..., None, :]
-        transverse = identity - longitudinal
-        precision += longitudinal / range_variance[
-            ..., anchor_index, None, None
-        ]
-        precision += transverse / (
-            ranges[..., anchor_index, None, None] ** 2
-            * direction_variance[..., anchor_index, None, None]
-        )
+    try:
+        inverse_cholesky = np.linalg.inv(np.linalg.cholesky(covariance))
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("reported covariance must be positive definite") from exc
+    whitened = inverse_cholesky @ jacobian
+    precision = np.sum(
+        np.swapaxes(whitened, -1, -2) @ whitened, axis=-3,
+    )
 
     gps_std = np.asarray(gps_noise_std_m, dtype=np.float64)
     if gps_std.shape != (3,) or np.any(gps_std < 0.0):
@@ -423,6 +439,7 @@ def compute_uncertainty_robust_neighbor_features(
     num_neighbors: int,
     consensus_iterations: int = 8,
     fixed_neighbor_indices: np.ndarray | None = None,
+    reported_covariance: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return three uncertainty-aware robust consensus features per UAV.
 
@@ -460,6 +477,7 @@ def compute_uncertainty_robust_neighbor_features(
         directions,
         isac_model=isac_model,
         gps_noise_std_m=gps_noise_std_m,
+        reported_covariance=reported_covariance,
     )
     neighbor_indices, _ = _resolve_neighbor_indices(
         isac,
@@ -578,7 +596,7 @@ def compute_uncertainty_robust_neighbor_features(
 
 
 class PaperFeatureExtractor:
-    """Construct 6 + 2 + 3 instantaneous detector features.
+    """Construct link, position and neighborhood instantaneous features.
 
     Temporal dependence is intentionally left to the sequence model.  The
     extractor therefore contains no EWMA, CUSUM, history window, or other
@@ -596,6 +614,10 @@ class PaperFeatureExtractor:
         self.isac_model = isac_model
         self.localizer = localizer or RangeDirectionLocalizer()
         self.gps_noise_std_m = tuple(float(value) for value in gps_noise_std_m)
+        gps_std = np.asarray(self.gps_noise_std_m, dtype=np.float64)
+        if gps_std.shape != (3,) or np.any(~np.isfinite(gps_std)) or np.any(gps_std < 0.0):
+            raise ValueError("gps_noise_std_m must contain three finite nonnegative values")
+        self._gps_covariance = np.diag(gps_std * gps_std)
         self.feature_names = feature_names_for_neighbor_mode(
             self.config.neighbor_feature_mode
         )
@@ -673,6 +695,7 @@ class PaperFeatureExtractor:
                 gps_noise_std_m=self.gps_noise_std_m,
                 num_neighbors=self.config.num_neighbors,
                 fixed_neighbor_indices=self._fixed_neighbor_indices,
+                reported_covariance=measurement.reported_covariance,
             )
         if self.config.neighbor_feature_mode == "inter_uav":
             if inter_uav_measurement is None:
@@ -698,34 +721,40 @@ class PaperFeatureExtractor:
         measurement: ISACMeasurement,
         inter_uav_measurement: InterUAVMeasurement | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-        """Build detector-visible features from GPS, ISAC, and trusted motion.
+        """Build features from reports and the known executed velocity command.
 
-        ``trusted_velocity_mps`` and ``trusted_heading`` represent planned or
-        flight-controller motion information.  Simulator ground-truth position
-        is deliberately not an input to this method.
+        trusted_velocity_mps keeps its historical argument name for caller
+        compatibility. It means the issued command under ideal velocity
+        tracking. trusted_heading is retained only for signature compatibility.
+        The projection direction is derived from the command, with the
+        projection set to zero at zero commanded speed.
         """
-        gps = np.asarray(gps_position_m, dtype=np.float32)
-        velocity = np.asarray(trusted_velocity_mps, dtype=np.float32)
-        heading = np.asarray(trusted_heading, dtype=np.float32)
-        anchors = self.isac_model.anchors_m.astype(np.float32)
+        gps = np.asarray(gps_position_m, dtype=np.float64)
+        velocity = np.asarray(trusted_velocity_mps, dtype=np.float64)
+        if gps.ndim != 2 or gps.shape[-1] != 3 or velocity.shape != gps.shape:
+            raise ValueError("GPS and command velocity must have shape (N, 3)")
+        if not np.all(np.isfinite(gps)) or not np.all(np.isfinite(velocity)):
+            raise ValueError("GPS and command velocity must be finite")
+        heading = unit(velocity)
+        anchors = self.isac_model.anchors_m.astype(np.float64)
 
         gps_displacement = anchors[None, :, :] - gps[:, None, :]
         gps_range = np.linalg.norm(gps_displacement, axis=-1)
         gps_los = unit(gps_displacement)
         gps_radial = np.sum(velocity[:, None, :] * gps_los, axis=-1)
-        range_var, radial_var, direction_var, estimated_snr = (
-            self.isac_model.variances_from_range(measurement.range_m)
+        sigma_range, sigma_radial, sigma_direction, direction_difference_covariance = (
+            self._residual_scales(measurement, velocity)
         )
-        sigma_range = np.sqrt(range_var)
-        sigma_radial = np.sqrt(radial_var)
-        sigma_direction = np.sqrt(direction_var)
 
         range_residual = np.abs(measurement.range_m - gps_range) / sigma_range
         radial_residual = (
             np.abs(measurement.radial_velocity_mps - gps_radial) / sigma_radial
         )
-        cosine = np.sum(measurement.los_unit * gps_los, axis=-1)
-        direction_residual = np.abs(1.0 - cosine) / sigma_direction
+        # For unit vectors, 1 - u_I.T u_g == ||u_I-u_g||^2 / 2.
+        # The latter avoids cancellation for very precise angle observations.
+        measured_los = unit(np.asarray(measurement.los_unit, dtype=np.float64))
+        direction_raw = 0.5 * np.sum((measured_los - gps_los) ** 2, axis=-1)
+        direction_residual = direction_raw / sigma_direction
         link_residual = np.stack(
             [range_residual, radial_residual, direction_residual], axis=2
         ).astype(np.float32)
@@ -734,7 +763,8 @@ class PaperFeatureExtractor:
             residual_mean, residual_max
         )
 
-        if self._previous_isac_position is None:
+        reported_covariance = getattr(measurement, "reported_covariance", None)
+        if self._previous_isac_position is None and reported_covariance is None:
             initial = self.localizer.initialize(
                 anchors,
                 measurement.range_m,
@@ -743,12 +773,17 @@ class PaperFeatureExtractor:
             )
         else:
             initial = self._previous_isac_position
+        quality_arguments = {}
+        if reported_covariance is not None:
+            quality_arguments = {
+                "measurement_covariance": reported_covariance,
+                "azimuth_rad": measurement.azimuth_rad,
+                "elevation_rad": measurement.elevation_rad,
+            }
         isac_position = self.localizer.estimate(
-            anchors,
-            measurement.range_m,
-            measurement.los_unit,
-            measurement.valid_mask,
-            initial_position_m=initial,
+            anchors, measurement.range_m, measurement.los_unit,
+            measurement.valid_mask, initial_position_m=initial,
+            **quality_arguments,
         )
         self._previous_isac_position = isac_position.copy()
 
@@ -780,13 +815,89 @@ class PaperFeatureExtractor:
         diagnostics.update(
             {
                 "link_residual": link_residual,
-                "estimated_snr": estimated_snr.astype(np.float32),
+                "estimated_snr": np.asarray(measurement.snr_linear, dtype=np.float32),
+                "quality_source": (
+                    "reported_power_crb" if reported_covariance is not None
+                    else "legacy_reported_variances"
+                ),
+                "residual_scale_range_m": sigma_range,
+                "residual_scale_radial_velocity_mps": sigma_radial,
+                "residual_scale_direction": sigma_direction,
+                "direction_difference_covariance": direction_difference_covariance,
                 "self_features": self_features,
                 "neighbor_features": neighbor_features,
                 "neighbor_feature_mode": self.config.neighbor_feature_mode,
             }
         )
         return features, isac_position, diagnostics
+
+    def _residual_scales(
+        self, measurement: ISACMeasurement, command_velocity_mps: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Nominal GPS--ISAC scales from receiver-visible geometry and quality."""
+        ranges = np.asarray(measurement.range_m, dtype=np.float64)
+        los = unit(np.asarray(measurement.los_unit, dtype=np.float64))
+        if np.any(ranges <= 0.0) or not np.all(np.isfinite(ranges)):
+            raise ValueError("positive measured ranges are required for local uncertainty propagation")
+        reported = getattr(measurement, "reported_covariance", None)
+        if reported is None:
+            # Older observations may already carry receiver variance reports.
+            # Do not infer their quality again from measured range.
+            range_variance = np.asarray(measurement.range_variance, dtype=np.float64)
+            radial_variance = np.asarray(measurement.radial_velocity_variance, dtype=np.float64)
+            projector = np.eye(3) - los[..., :, None] * los[..., None, :]
+            los_covariance = (
+                np.asarray(measurement.direction_variance)[..., None, None] * projector
+            )
+        else:
+            covariance = np.asarray(reported, dtype=np.float64)
+            if covariance.shape != ranges.shape + (4, 4):
+                raise ValueError("reported covariance must have shape (N, M, 4, 4)")
+            range_variance = covariance[..., 0, 0]
+            radial_variance = covariance[..., 3, 3]
+            los_covariance = getattr(measurement, "reported_los_covariance", None)
+            if los_covariance is None:
+                outward = -los
+                theta = np.arctan2(outward[..., 1], outward[..., 0])
+                phi = np.arctan2(outward[..., 2], np.linalg.norm(outward[..., :2], axis=-1))
+                ct, st, cp, sp = np.cos(theta), np.sin(theta), np.cos(phi), np.sin(phi)
+                angle_jacobian = np.stack(
+                    [
+                        np.stack([cp * st, -cp * ct, np.zeros_like(cp)], axis=-1),
+                        np.stack([sp * ct, sp * st, -cp], axis=-1),
+                    ], axis=-1,
+                )
+                los_covariance = (
+                    angle_jacobian @ covariance[..., 1:3, 1:3]
+                    @ np.swapaxes(angle_jacobian, -1, -2)
+                )
+            else:
+                los_covariance = np.asarray(los_covariance, dtype=np.float64)
+        projector = np.eye(3) - los[..., :, None] * los[..., None, :]
+        gps_direction_jacobian = -projector / ranges[..., None, None]
+        gps_direction_covariance = (
+            gps_direction_jacobian @ self._gps_covariance
+            @ np.swapaxes(gps_direction_jacobian, -1, -2)
+        )
+        combined_direction_covariance = los_covariance + gps_direction_covariance
+        range_variance = range_variance + np.einsum(
+            "...i,ij,...j->...", los, self._gps_covariance, los,
+        )
+        radial_variance = radial_variance + np.einsum(
+            "ni,nmij,nj->nm", command_velocity_mps,
+            gps_direction_covariance, command_velocity_mps,
+        )
+        direction_variance = 0.5 * np.einsum(
+            "...ij,...ji->...", combined_direction_covariance,
+            combined_direction_covariance,
+        )
+        scales = (range_variance, radial_variance, direction_variance)
+        if any(np.any(~np.isfinite(v)) or np.any(v <= 0.0) for v in scales):
+            raise ValueError("reported measurement uncertainty must yield finite positive residual scales")
+        return (
+            np.sqrt(range_variance), np.sqrt(radial_variance),
+            np.sqrt(direction_variance), combined_direction_covariance,
+        )
 
 
 # ── UAV 互测距一致性特征 ─────────────────────────────────────────
@@ -877,59 +988,41 @@ def compute_inter_uav_consistency_feature(
     *,
     carrier_hz: float = 3.0e9,
     bandwidth_hz: float = 30.0e6,
-    tx_power_dbm: float = 27.0,
-    radar_cross_section: float = 6.0,
+    tx_power_dbm: float = 0.0,
+    radar_cross_section: float = 0.05,
     num_neighbors: int = 3,
     rng: np.random.Generator | None = None,
 ) -> np.ndarray:
-    """Simulate and aggregate inter-UAV ranging consistency features.
+    """Simulation convenience wrapper using the current monostatic CRB model.
 
-    Simulates direct UAV-to-UAV ISAC ranging and compares ISAC-measured
-    inter-UAV distances against GPS-derived distances.  The ranging noise
-    follows the identical radar equation as the base-station ISAC model.
-
-    Returns ``(..., num_uavs, 2)`` float32 array:
-      F0 = min disparity over K neighbours (best pair)
-      F1 = max disparity over K neighbours (worst pair)
+    True positions belong to the simulator only. Processing callers should use
+    compute_inter_uav_consistency_from_measurement with their measured ranges.
+    Remaining peer parameters use ISACConfig reference defaults, including its
+    observation time, noise figure, loss and effective receive-array gain.
     """
     true_pos = np.asarray(true_position_m, dtype=np.float64)
     gps_pos = np.asarray(gps_observed_m, dtype=np.float64)
     if true_pos.shape != gps_pos.shape or true_pos.ndim < 2 or true_pos.shape[-1] != 3:
         raise ValueError("positions must have shape (..., num_uavs, 3)")
+    if num_neighbors < 0:
+        raise ValueError("num_neighbors must be non-negative")
     num_uavs = true_pos.shape[-2]
     k = min(int(num_neighbors), max(num_uavs - 1, 0))
-    if k <= 0:
+    if k == 0:
         return np.zeros(true_pos.shape[:-1] + (2,), dtype=np.float32)
-
+    model = ISACMeasurementModel(ISACConfig(
+        inter_uav_carrier_hz=carrier_hz,
+        inter_uav_bandwidth_hz=bandwidth_hz,
+        inter_uav_tx_power_dbm=tx_power_dbm,
+        radar_cross_section=radar_cross_section,
+    ))
+    generator = np.random.default_rng(0) if rng is None else rng
     flat_true = true_pos.reshape(-1, num_uavs, 3)
     flat_gps = gps_pos.reshape(-1, num_uavs, 3)
-    pair_dists = np.linalg.norm(
-        flat_true[:, :, None, :] - flat_true[:, None, :, :], axis=-1)
-    r_true = pair_dists.copy()
-
-    wavelength = 3.0e8 / carrier_hz
-    tx_power_w = 10.0 ** ((tx_power_dbm - 30.0) / 10.0)
-    noise_density_w_hz = 10.0 ** ((-174.0 - 30.0) / 10.0)
-    noise_power_w = noise_density_w_hz * bandwidth_hz
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        snr = (tx_power_w * radar_cross_section * wavelength**2
-               / ((4.0 * np.pi) ** 3 * r_true**4 * noise_power_w))
-    snr = np.where(r_true > 0.0, snr, np.inf)
-    range_variance = (3.0e8 / bandwidth_hz) ** 2 / snr
-    sigma_range = np.sqrt(np.maximum(range_variance, 0.0))
-
-    if rng is None:
-        rng = np.random.default_rng(0)
-    noise = rng.normal(0.0, 1.0, r_true.shape).astype(np.float64)
-    r_isac = r_true + noise * sigma_range
-    diagonal = np.arange(num_uavs)
-    r_isac[:, diagonal, diagonal] = 0.0
-    valid = np.broadcast_to(~np.eye(num_uavs, dtype=bool), r_isac.shape)
-    features = compute_inter_uav_consistency_from_measurement(
-        flat_gps,
-        r_isac,
-        valid,
-        num_neighbors=k,
-    )
-    return features.reshape(true_pos.shape[:-1] + (2,))
+    rows = []
+    for position, gps in zip(flat_true, flat_gps):
+        measured = model.measure_inter_uav(position, generator)
+        rows.append(compute_inter_uav_consistency_from_measurement(
+            gps, measured.range_m, measured.valid_mask, num_neighbors=k,
+        ))
+    return np.stack(rows).reshape(true_pos.shape[:-1] + (2,))

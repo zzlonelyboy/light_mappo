@@ -1,0 +1,177 @@
+{
+  "model_schema": "crb_received_power_v1",
+  "simulation": {
+    "num_uavs": 8,
+    "dt_s": 0.02,
+    "duration_s": 60.0,
+    "speed_mps": 4.0,
+    "trajectory_types": [
+      "straight",
+      "circle",
+      "helix",
+      "s_curve"
+    ],
+    "formation_type": "cubic",
+    "cube_edge_length_m": 8.0,
+    "formation_jitter_std_m": 0.5,
+    "s_curve_start_m": [
+      0.0,
+      0.0,
+      10.0
+    ],
+    "s_curve_target_m": [
+      100.0,
+      100.0,
+      50.0
+    ],
+    "s_curve_lateral_amplitude_m": 44.0
+  },
+  "gps": {
+    "noise_std_m": [
+      1.5,
+      1.5,
+      3.0
+    ]
+  },
+  "attack": {
+    "replay_source": "recorded_normal_episode",
+    "clean_episode_probability": 0.25,
+    "attack_types": [
+      "random",
+      "replay",
+      "stealth"
+    ],
+    "duration_fraction_range": [
+      0.2,
+      0.4
+    ],
+    "target_count_range": [
+      1,
+      4
+    ],
+    "severity_levels": [
+      "weak",
+      "medium",
+      "strong"
+    ],
+    "random_sigma_ranges_m": [
+      [
+        0.25,
+        0.75
+      ],
+      [
+        0.75,
+        1.5
+      ],
+      [
+        1.5,
+        3.0
+      ]
+    ],
+    "replay_delay_ranges_s": [
+      [
+        0.2,
+        0.5
+      ],
+      [
+        0.5,
+        1.5
+      ],
+      [
+        1.5,
+        3.0
+      ]
+    ],
+    "stealth_rate_ranges_mps": [
+      [
+        0.1,
+        0.3
+      ],
+      [
+        0.3,
+        0.8
+      ],
+      [
+        0.8,
+        1.2
+      ]
+    ]
+  },
+  "isac": {
+    "anchors_m": [
+      [
+        25.0,
+        35.0,
+        0.0
+      ],
+      [
+        25.0,
+        70.0,
+        0.0
+      ],
+      [
+        60.0,
+        35.0,
+        0.0
+      ],
+      [
+        85.0,
+        70.0,
+        0.0
+      ]
+    ],
+    "carrier_hz": 3000000000.0,
+    "bs_carrier_hz": [],
+    "bandwidth_hz": 40000000.0,
+    "tx_power_dbm": 27.0,
+    "radar_cross_section": 0.05,
+    "coherent_time_s": 0.01,
+    "tx_array_shape": [
+      8,
+      8
+    ],
+    "rx_array_shape": [
+      8,
+      8
+    ],
+    "noise_figure_db": 8.0,
+    "loss_db": 6.0,
+    "thermal_noise_dbm_hz": -174.0,
+    "transmit_match_power": 1.0,
+    "coverage_halfspace": [],
+    "inter_uav_carrier_hz": 3000000000.0,
+    "inter_uav_bandwidth_hz": 30000000.0,
+    "inter_uav_tx_power_dbm": 0.0,
+    "inter_uav_observation_time_s": 0.001,
+    "inter_uav_tx_gain": 1.0,
+    "inter_uav_rx_gain": 16.0,
+    "inter_uav_noise_figure_db": 9.0,
+    "inter_uav_loss_db": 6.0,
+    "effective_aperture_m": null
+  },
+  "features": {
+    "warmup_steps": 0,
+    "position_scale_m": 1.0,
+    "num_neighbors": 3,
+    "neighbor_feature_mode": "inter_uav",
+    "neighbor_selection_mode": "dynamic_isac"
+  },
+  "localization": {
+    "iterations": 50,
+    "damping": 1e-05,
+    "tolerance_m": 1e-05,
+    "step_clip_m": 10.0,
+    "line_search_steps": 8,
+    "relative_improvement_tolerance": 0.001,
+    "min_anchors": 4
+  },
+  "navigation": {
+    "enabled": true,
+    "position_gain_xy_s_inv": 0.95,
+    "position_gain_z_s_inv": 1.0,
+    "max_speed_mps": 8.0,
+    "mitigation_enabled": false,
+    "confirmation_steps": 5,
+    "alarm_threshold": 0.5
+  }
+}

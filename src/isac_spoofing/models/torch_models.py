@@ -10,11 +10,11 @@ except ImportError as exc:  # pragma: no cover - only used with optional depende
 
 
 class TimeStepMLP(nn.Module):
-    """Non-temporal binary baseline for one 11-D UAV feature vector."""
+    """Non-temporal binary baseline for one 10-D UAV feature vector."""
 
     def __init__(
         self,
-        input_dim: int = 11,
+        input_dim: int = 10,
         hidden_dim: int = 64,
         hidden_dims: tuple[int, ...] | None = None,
         output_dim: int = 1,
@@ -45,7 +45,7 @@ class CausalGRUDetector(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 11,
+        input_dim: int = 10,
         hidden_dim: int = 64,
         num_layers: int = 1,
         output_dim: int = 1,
@@ -83,7 +83,7 @@ class CausalGRUDetector(nn.Module):
 
 def build_detector(
     model_type: str,
-    input_dim: int = 11,
+    input_dim: int = 10,
     hidden_dim: int = 64,
     num_layers: int = 1,
     mlp_hidden_dims: tuple[int, ...] | None = None,

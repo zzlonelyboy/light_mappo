@@ -210,6 +210,7 @@ def test_event_likelihood_objective_matches_declared_components() -> None:
         confirmation_steps=2,
         confirmation_temperature=1.0,
         time_step_s=0.1,
+        alarm_availability_offset_steps=0,
         detection_loss_weight=0.2,
         delay_loss_weight=0.3,
         false_alarm_loss_weight=0.4,
@@ -339,7 +340,7 @@ def test_checkpoint_selection_uses_only_lower_finite_validation_loss() -> None:
     [
         (TrainingConfig(loss_objective="unknown"), "loss_objective"),
         (TrainingConfig(confirmation_steps=0), "confirmation_steps"),
-        (TrainingConfig(confirmation_steps=6), "confirmation_steps"),
+        (TrainingConfig(confirmation_steps=True), "confirmation_steps"),
         (TrainingConfig(confirmation_temperature=0.0), "confirmation_temperature"),
         (TrainingConfig(time_step_s=0.0), "time_step_s"),
         (TrainingConfig(detection_loss_weight=float("nan")), "detection_loss_weight"),

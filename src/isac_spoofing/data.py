@@ -40,6 +40,34 @@ ARRAY_FIELDS = (
 )
 
 
+NAVIGATION_ARRAY_FIELDS = (
+    "reference_position_m",
+    "reference_velocity_mps",
+    "command_velocity_mps",
+    "tracking_error_m",
+)
+
+MODEL_ARRAY_FIELDS = (
+    "available_time_s",
+    "navigation_mode",
+    "navigation_position_m",
+    "confirmed_alarm",
+    "detection_probability",
+    "isac_azimuth_rad",
+    "isac_elevation_rad",
+    "isac_received_power_w",
+    "isac_reported_power_w",
+    "isac_measurement_covariance",
+    "isac_reported_covariance",
+    "isac_reported_los_covariance",
+    "inter_uav_received_power_w",
+    "inter_uav_reported_power_w",
+    "replay_source_gps_m",
+)
+
+OPTIONAL_ARRAY_FIELDS = (*NAVIGATION_ARRAY_FIELDS, *MODEL_ARRAY_FIELDS)
+
+
 def save_episode(
     episode: EpisodeData,
     output_directory: str | Path,
@@ -49,6 +77,10 @@ def save_episode(
     output.mkdir(parents=True, exist_ok=True)
     npz_path = output / f"{episode_id}.npz"
     arrays = {name: getattr(episode, name) for name in ARRAY_FIELDS}
+    arrays.update({
+        name: getattr(episode, name) for name in OPTIONAL_ARRAY_FIELDS
+        if getattr(episode, name) is not None
+    })
     arrays["feature_names"] = np.asarray(episode.feature_names)
     np.savez_compressed(npz_path, **arrays)
     with (output / f"{episode_id}.json").open("w", encoding="utf-8") as handle:
@@ -93,6 +125,12 @@ def save_episode_shard(
         name: np.stack([getattr(episode, name) for episode in episode_list], axis=0)
         for name in ARRAY_FIELDS
     }
+    for name in OPTIONAL_ARRAY_FIELDS:
+        values = [getattr(episode, name) for episode in episode_list]
+        if all(value is not None for value in values):
+            arrays[name] = np.stack(values, axis=0)
+        elif any(value is not None for value in values):
+            raise ValueError(f"inconsistent optional navigation array in shard: {name}")
     arrays["feature_names"] = np.asarray(feature_names)
     arrays["episode_ids"] = np.asarray(episode_ids)
     metadata = {

@@ -31,6 +31,7 @@ class EpisodeProbability:
     has_attack: np.ndarray
     attack_start_step: np.ndarray
     attack_end_step_exclusive: np.ndarray
+    alarm_availability_offset_steps: int = 0
 
 
 def _json_ready(value):
@@ -73,6 +74,9 @@ def predict_episodes(
                 attack_end_step_exclusive=np.asarray(
                     episode["attack_end_step_exclusive"]
                 ),
+                alarm_availability_offset_steps=int(
+                    episode.get("alarm_availability_offset_steps", 0)
+                ),
             )
         )
     if not predictions:
@@ -113,6 +117,7 @@ def evaluate_episode_probabilities(
                 num_steps=episode.probability.shape[0],
                 dt_s=dt_s,
                 warmup_steps=warmup_steps,
+                alarm_availability_offset_steps=episode.alarm_availability_offset_steps,
             )
         )
     return aggregate_event_results(

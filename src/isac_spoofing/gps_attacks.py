@@ -41,6 +41,47 @@ class GPSAttackInjector:
         low, high = sorted((float(bounds[0]), float(bounds[1])))
         return float(rng.uniform(low, high)) if high > low else low
 
+    def _replay_mode(self, scenario: AttackScenario | None = None) -> str:
+        mode = (
+            self.config.replay_source
+            if scenario is None else
+            scenario.parameters.get("replay_source", self.config.replay_source)
+        )
+        if mode not in ("recorded_normal_episode", "delayed_clean_stream"):
+            raise ValueError(f"unsupported replay source: {mode!r}")
+        return str(mode)
+
+    def _replay_values(
+        self,
+        gps_clean_m: np.ndarray,
+        scenario: AttackScenario,
+        source_indices: int | np.ndarray,
+        targets: np.ndarray,
+        replay_source_gps_m: np.ndarray | None,
+    ) -> np.ndarray:
+        mode = self._replay_mode(scenario)
+        if mode == "recorded_normal_episode":
+            if replay_source_gps_m is None:
+                raise ValueError("recorded_normal_episode requires replay_source_gps_m")
+            source = np.asarray(replay_source_gps_m)
+        else:
+            source = gps_clean_m
+        if source.ndim != 3 or source.shape[1:] != gps_clean_m.shape[1:]:
+            raise ValueError("replay source must have shape (T_source,N,3) matching the victim UAVs")
+        indices = np.asarray(source_indices, dtype=np.int64)
+        if np.any(indices < 0) or np.any(indices >= source.shape[0]):
+            raise ValueError("replay source does not cover the requested recording indices")
+        if indices.ndim == 0:
+            values = source[int(indices), targets]
+        else:
+            values = source[indices[:, None], targets[None, :]]
+        # Inspect only the samples being used, not the entire recording on
+        # every streaming call. A float32 recording is copied without new noise.
+        values = np.asarray(values, dtype=np.float32)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("replay source contains non-finite requested GPS samples")
+        return values
+
     def _sample_event_strength(
         self,
         attack_type: str,
@@ -62,14 +103,28 @@ class GPSAttackInjector:
             bounds = self.config.replay_delay_ranges_s[severity_index]
             value = self._sample_fraction(rng, bounds)
             delay_steps = max(1, int(np.round(value / self.dt_s)))
-            return {
+            mode = self._replay_mode()
+            parameters = {
                 "severity_level": severity_level,
                 "strength_value": value,
                 "strength_unit": "s",
+                "replay_source": mode,
+                "offset_semantics": (
+                    "trajectory_phase_offset" if mode == "recorded_normal_episode"
+                    else "measurement_delay"
+                ),
+                # Preserve the historical parameter names for old consumers.
                 "delay_s": value,
                 "delay_steps": delay_steps,
                 "effective_delay_s": delay_steps * self.dt_s,
             }
+            if mode == "recorded_normal_episode":
+                parameters.update({
+                    "phase_offset_s": value,
+                    "phase_offset_steps": delay_steps,
+                    "effective_phase_offset_s": delay_steps * self.dt_s,
+                })
+            return parameters
         if attack_type == "stealth":
             bounds = self.config.stealth_rate_ranges_mps[severity_index]
             value = self._sample_fraction(rng, bounds)
@@ -144,6 +199,16 @@ class GPSAttackInjector:
         target_mask[targets] = True
 
         parameters = self._sample_event_strength(attack_type, rng)
+        if attack_type == "replay":
+            delay_steps = int(parameters["delay_steps"])
+            if delay_steps > latest_start_step:
+                raise ValueError(
+                    "episode is too short for the sampled replay delay and complete "
+                    "attack duration; increase duration_s or reduce replay_delay_ranges_s"
+                )
+            if start_step < delay_steps:
+                start_step = int(rng.integers(delay_steps, latest_start_step + 1))
+                end_step = start_step + nominal_duration_steps
 
         return AttackScenario(
             attack_type=attack_type,
@@ -156,12 +221,85 @@ class GPSAttackInjector:
             was_truncated=was_truncated,
         )
 
+    def apply_step(
+        self,
+        gps_clean_history_m: np.ndarray,
+        scenario: AttackScenario,
+        time_index: int,
+        rng: np.random.Generator,
+        heading: np.ndarray | None = None,
+        *,
+        replay_source_gps_m: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Inject into the current simulated observation using available history.
+
+        Victim history ends at the current step. Recorded replay reads a
+        completed normal flight, while delayed mode reads this plant's past
+        clean observations. Neither mode reads future victim observations.
+        """
+        history = np.asarray(gps_clean_history_m, dtype=np.float32)
+        if (
+            history.ndim != 3
+            or history.shape[0] != time_index + 1
+            or history.shape[2] != 3
+        ):
+            raise ValueError("GPS history must have shape (time_index + 1, N, 3)")
+        observed = history[-1].copy()
+        num_uavs = observed.shape[0]
+        if np.asarray(scenario.target_mask).shape != (num_uavs,):
+            raise ValueError("attack target mask must match the UAV count")
+        labels = np.zeros(num_uavs, dtype=np.uint8)
+        if scenario.attack_type == "clean" or not (
+            scenario.start_step <= time_index < scenario.end_step
+        ):
+            return observed, labels
+        targets = np.flatnonzero(scenario.target_mask)
+        labels[targets] = 1
+        if scenario.attack_type == "random":
+            observed[targets] += rng.normal(
+                0.0, float(scenario.parameters["sigma_m"]), (targets.size, 3)
+            )
+        elif scenario.attack_type == "replay":
+            delay = int(scenario.parameters["delay_steps"])
+            if delay < 1:
+                raise ValueError("replay delay_steps must be positive")
+            if time_index < delay:
+                raise ValueError("replay requires a complete historical GPS report")
+            observed[targets] = self._replay_values(
+                history, scenario, time_index - delay, targets, replay_source_gps_m,
+            )
+        elif scenario.attack_type == "stealth":
+            if "directions" not in scenario.parameters:
+                if heading is None:
+                    directions = np.zeros((num_uavs, 3), dtype=np.float32)
+                    directions[:, 0] = 1.0
+                else:
+                    directions = np.asarray(heading, dtype=np.float32).copy()
+                if directions.shape != (num_uavs, 3):
+                    raise ValueError("stealth headings must have shape (N, 3)")
+                norms = np.linalg.norm(directions, axis=1, keepdims=True)
+                if not np.all(np.isfinite(norms)) or np.any(norms <= 0.0):
+                    raise ValueError("stealth attack requires non-zero headings")
+                scenario.parameters["directions"] = (directions / norms).tolist()
+            directions = np.asarray(scenario.parameters["directions"], dtype=np.float32)
+            if directions.shape != (num_uavs, 3) or not np.all(np.isfinite(directions)):
+                raise ValueError("stealth directions must be finite with shape (N, 3)")
+            elapsed_s = (time_index - scenario.start_step) * self.dt_s
+            observed[targets] += (
+                elapsed_s * float(scenario.parameters["rate_mps"]) * directions[targets]
+            )
+        else:
+            raise ValueError(f"unsupported attack type: {scenario.attack_type}")
+        return observed, labels
+
     def apply(
         self,
         gps_clean_m: np.ndarray,
         scenario: AttackScenario,
         rng: np.random.Generator,
         heading: np.ndarray | None = None,
+        *,
+        replay_source_gps_m: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         # Attacks act on the nominal GPS observation, not directly on simulator
         # ground truth.  This is identical to the legacy equations when nominal
@@ -184,9 +322,12 @@ class GPSAttackInjector:
             observed[active, targets, :] = nominal[active, targets, :] + noise
         elif scenario.attack_type == "replay":
             delay = int(scenario.parameters["delay_steps"])
-            for time_index in range(scenario.start_step, scenario.end_step):
-                source_index = max(0, time_index - delay)
-                observed[time_index, targets] = nominal[source_index, targets]
+            if delay < 1 or scenario.start_step < delay:
+                raise ValueError("replay requires a positive delay and sufficient history")
+            source_indices = np.arange(scenario.start_step, scenario.end_step) - delay
+            observed[active, targets, :] = self._replay_values(
+                nominal, scenario, source_indices, targets, replay_source_gps_m,
+            )
         elif scenario.attack_type == "stealth":
             if heading is None:
                 directions = np.zeros((num_uavs, 3), dtype=np.float32)

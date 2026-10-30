@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import math
 from pathlib import Path
@@ -32,12 +32,13 @@ CHECKPOINT_SELECTION_METHOD = "minimum_validation_total_loss_v1"
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    model_type: str = "mlp"
+    model_type: str = "gru"
     class_weighting: str = "balanced"
     loss_objective: str = "bce"
     confirmation_steps: int = 5
     confirmation_temperature: float = 0.1
-    time_step_s: float = 0.1
+    time_step_s: float = 0.02
+    alarm_availability_offset_steps: int = 1
     detection_loss_weight: float = 0.1
     delay_loss_weight: float = 0.01
     false_alarm_loss_weight: float = 0.05
@@ -70,8 +71,10 @@ class TrainingConfig:
                 f"loss_objective must be one of {LOSS_OBJECTIVES}, "
                 f"got {self.loss_objective!r}"
             )
-        if not 1 <= self.confirmation_steps <= 5:
-            raise ValueError("confirmation_steps must lie in [1, 5]")
+        if isinstance(self.confirmation_steps, bool) or not isinstance(self.confirmation_steps, int) or self.confirmation_steps < 1:
+            raise ValueError("confirmation_steps must be a positive integer")
+        if isinstance(self.alarm_availability_offset_steps, bool) or not isinstance(self.alarm_availability_offset_steps, int) or self.alarm_availability_offset_steps < 0:
+            raise ValueError("alarm_availability_offset_steps must be a non-negative integer")
         if (
             not math.isfinite(self.confirmation_temperature)
             or self.confirmation_temperature <= 0.0
@@ -435,6 +438,7 @@ def _event_likelihood_losses(
     time_step_s: float,
     early_detection_deadline_s: float,
     warmup_steps: int = 0,
+    alarm_availability_offset_steps: int = 0,
 ):
     """Compute event terms with one vectorized Soft-Min K-hazard pass."""
 
@@ -478,7 +482,8 @@ def _event_likelihood_losses(
             packed_logits.shape[1],
             dtype=logits.dtype,
             device=logits.device,
-        ).unsqueeze(0) * float(time_step_s)
+        ).unsqueeze(0)
+        delay_s = (delay_s + alarm_availability_offset_steps) * float(time_step_s)
         normalized_delay = torch.clamp(
             delay_s / float(early_detection_deadline_s),
             max=1.0,
@@ -646,6 +651,7 @@ def binary_detection_objective(
         confirmation_steps=training_config.confirmation_steps,
         temperature=training_config.confirmation_temperature,
         time_step_s=training_config.time_step_s,
+        alarm_availability_offset_steps=training_config.alarm_availability_offset_steps,
         early_detection_deadline_s=training_config.early_detection_deadline_s,
         warmup_steps=monitoring_warmup_steps,
     )
@@ -673,6 +679,7 @@ def _hard_event_summary_from_sequences(
     confirmation_steps: int,
     time_step_s: float,
     warmup_steps: int,
+    alarm_availability_offset_steps: int = 0,
 ) -> dict[str, object]:
     """Evaluate hard K-step alarms on independent per-UAV validation sequences."""
 
@@ -715,6 +722,7 @@ def _hard_event_summary_from_sequences(
                 num_steps=hard_predictions.shape[0],
                 dt_s=time_step_s,
                 warmup_steps=warmup_steps,
+                alarm_availability_offset_steps=alarm_availability_offset_steps,
             )
         )
     return aggregate_event_results(episode_results, bootstrap_samples=0, seed=0)
@@ -859,6 +867,7 @@ def _run_epoch(
             confirmation_steps=training_config.confirmation_steps,
             time_step_s=training_config.time_step_s,
             warmup_steps=monitoring_warmup_steps,
+            alarm_availability_offset_steps=training_config.alarm_availability_offset_steps,
         )
     return summary
 
@@ -1044,7 +1053,15 @@ def train_detector(
     torch, nn, DataLoader = _import_torch()
     from .models.torch_models import build_detector
 
+    from .metrics import alarm_availability_offset_steps
+    manifest_path = Path(data_root) / "manifest.json"
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        source_manifest = json.load(handle)
     training_config = config or TrainingConfig()
+    training_config = replace(
+        training_config,
+        alarm_availability_offset_steps=alarm_availability_offset_steps(source_manifest),
+    )
     training_config.validate()
     if training_config.loss_objective == "event_likelihood":
         dataset_dt_s = _dataset_time_step_s(data_root)
@@ -1246,7 +1263,10 @@ def train_detector(
             best_training_event_loss_scale = event_loss_scale
             epochs_without_improvement = 0
             checkpoint = {
-                "schema_version": "1.12",
+                "schema_version": "1.13",
+                "source_dataset_schema_version": source_manifest.get("schema_version", "legacy"),
+                "measurement_timing": source_manifest.get("measurement_timing"),
+                "source_model_config": source_manifest.get("config", {}),
                 "model_type": training_config.model_type,
                 "model_config": {
                     "input_dim": feature_dim,
@@ -1395,8 +1415,8 @@ def train_detector(
                 "vectorized normalized Soft-Min over each K-logit window, "
                 "followed by a differentiable conditional alarm hazard and "
                 "exclusive cumulative log survival; confirmation_temperature "
-                "controls both smoothing stages and logit zero is the deployed "
-                "p=0.5 threshold in the zero-temperature limit"
+                "controls both smoothing stages. The zero-temperature hard-rule "
+                "equivalence excludes zero-logit boundary windows"
             ),
             "false_alarm_definition": (
                 "mean length-normalized negative log no-alarm probability over "

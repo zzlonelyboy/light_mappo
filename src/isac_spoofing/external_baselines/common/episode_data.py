@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Iterator
 
 import numpy as np
+
+from ...metrics import alarm_availability_offset_steps as resolve_alarm_offset_steps
 
 
 REQUIRED_RAW_FIELDS = (
@@ -33,6 +36,7 @@ class RawEpisode:
     attack_start_step: np.ndarray
     attack_end_step_exclusive: np.ndarray
     attack_was_truncated: np.ndarray
+    alarm_availability_offset_steps: int = 0
 
     @property
     def dt_s(self) -> float:
@@ -62,6 +66,9 @@ def validate_raw_shard(path: Path) -> int:
 
 
 def iter_raw_episodes(path: Path) -> Iterator[RawEpisode]:
+    metadata_path = path.with_suffix(".json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    item_metadata = metadata.get("episodes")
     with np.load(path, allow_pickle=False) as data:
         count = int(data["episode_ids"].shape[0])
         for index in range(count):
@@ -83,5 +90,8 @@ def iter_raw_episodes(path: Path) -> Iterator[RawEpisode]:
                 ),
                 attack_was_truncated=np.asarray(
                     data["attack_was_truncated"][index]
+                ),
+                alarm_availability_offset_steps=resolve_alarm_offset_steps(
+                    item_metadata[index] if isinstance(item_metadata, list) else metadata
                 ),
             )

@@ -1,93 +1,52 @@
-# ISAC 辅助的无人机 GPS 欺骗检测
+# ISAC 辅助 GPS 欺骗检测与导航闭环
 
-本目录是一个独立的数据生成、训练和评估项目。无人机运动由预定义轨迹驱动；检测器只接收 GPS、基站 ISAC、机间 ISAC 及可信运动信息，不接收真实位置。
+当前实现对应 [完整建模方案](docs/isac_model_improvement/complete_model.md)。模型使用接收功率形式 CRB、带噪 GPS、位置反馈控制和报警后的 ISAC 导航，检测输入保持 10 维。
 
-## 数据生成入口
+## 当前配置
 
-常规 D1 数据只使用 `scripts/generate_d1_multitrajectory.py`。参数 `--dataset-type` 选择数据用途：
+- 时间片为 20 ms，GPS、控制和检测每片更新。前 10 ms 机间轮发，后 10 ms 四站并行感知，结果片末可用。
+- 全网 160 MHz，每站 40 MHz，八目标均分后每目标 5 MHz。每站总功率 27 dBm，收发阵列均为 8×8。
+- 机间复用 30 MHz，每机观测 1 ms，功率 0 dBm，有效接收增益 16。同一波形不按邻机数量重复计资源。
+- GPS 水平单轴标准差为 1.5 m，垂直为 3.0 m，属于用户选定的主实验参考。水平尺度参考普通 GNSS 模块精度，垂直尺度为设计假设。
+- 重放默认采用 `attack.replay_source=recorded_normal_episode`。每个重放 episode 先完成一份独立正常 GPS 反馈飞行记录，与受攻击飞行共享参考计划和初态，但使用独立 GPS 噪声。攻击窗口只复制该记录的 GPS 样本，不重复加噪，实际运动和 ISAC 观测仍由受攻击飞行生成。
+- 位置反馈增益为水平 0.95、垂直 1.0 s⁻¹，理想速度跟踪，合速度上限 8 m/s。
+- 固定标称 RCS 为 0.05 m²，取 3GPP 小型 UAV 平均 RCS 的近似值。基站/机载噪声系数为 8/9 dB，剩余损耗均为 6 dB。
+- 准确功率报告和带噪角度用于处理端协方差。定位为固定协方差权重 WLS，特征归一化计入 GPS 噪声及方向二阶误差。
+- 默认连续 5 个时间片达到攻击阈值才确认告警，当前 20 ms 时间片对应 100 ms，配置采用 `navigation.confirmation_steps=5`。当前暂时关闭导航缓解，`navigation.enabled=true`、`navigation.mitigation_enabled=false`，保留 GPS 反馈运动、ISAC 测量和检测告警，告警不改变导航输入。
 
-- `training`：按 episode 划分为 `train/validation/test`（80%/10%/10%）。
-- `test`：所有 episode 均写入 `test`，用于纯测试或跨 RCS 测试。
+参考部署保留基站水平坐标，站高统一为 0 m。代码对违反已知上半空间或处于奇异角域的观测报错，不读取真值决定接收端角度分支。
 
-生成训练、验证和测试数据：
+## 配置与数据
 
-```powershell
-python scripts/generate_d1_multitrajectory.py `
-  --dataset-type training `
-  --episodes 2000 `
-  --trajectory-types straight circle helix s_curve `
-  --rcs 6 `
-  --seed 20260802 `
-  --output-dir dataNew
-```
+新配置使用 configs/default.json 或 configs/multitrajectory_crb.json。旧有效回波系数配置被明确标为历史模型，不把原数值 6 自动当作物理 RCS。
 
-生成一组纯测试数据：
+新数据使用 schema 3.0，记录片初观测和片末可用时刻。旧数据和旧权重不会自动变成新模型结果。审计数组含导航模式、导航输入、功率报告、角度和两端协方差，它们不加入检测输入。
 
-```powershell
-python scripts/generate_d1_multitrajectory.py `
-  --dataset-type test `
-  --episodes 1000 `
-  --trajectory-types straight circle helix s_curve `
-  --rcs-list 3 6 9 12 15 18 21 24 `
-  --seed 20260802 `
-  --output-dir dataNew
-```
+正常重放源保存在审计数组 `replay_source_gps_m`，元数据 `replay_recording` 记录来源、噪声种子和源索引。无独立源时数组为零，以 `present=false` 区分。每个源仅供本数据集中的一个受攻击 episode 使用，生成器核对来源不跨训练、验证和测试复用。重放配置中沿用的 `delay_steps` 在该模式下表示正常记录的轨迹相位偏移。旧的实时正常 GPS 历史延迟模式保留为 `delayed_clean_stream`，缺少 `replay_source` 的历史配置按旧模式加载。命令行 `--replay-source` 可覆盖配置，多进程使用同一模式。
 
-从已经生成的 K=3 原始测试集快速派生不同邻域大小的轻量测试视图：
+离线采集默认运行共同 GPS 反馈运动，报警不回灌导航。在线运行通过 detector 特征回调或 apply_detection_probabilities 接收每机概率。回调不获得真值或攻击标签，当前默认只检测和记录告警。显式将 `navigation.mitigation_enabled` 设为 `true` 后，确认报警才会在下一片切换并锁定 ISAC 导航，使用上一片定位加已知指令位移。开启缓解时误报也会触发切换。
 
-```powershell
-python scripts/rebuild_inter_uav_neighbor_views.py `
-  --source-dirs `
-    dataNew/d1_1000_multitrajectory_test_rcs3_seed20260802_interuav `
-    dataNew/d1_1000_multitrajectory_test_rcs6_seed20260802_interuav `
-    dataNew/d1_1000_multitrajectory_test_rcs12_seed20260802_interuav `
-  --neighbor-sizes 2 3 4 5 6 7 `
-  --workers 4
-```
+## 运行入口
 
-脚本只根据源 shard 中的 GPS 与完整机间 ISAC 测距矩阵重算最后两个
-min/max 邻域特征。K=3 直接复用源数据集，其他 K 输出为兼容现有评估器的
-轻量 shard，不重新生成轨迹、攻击或测量噪声。
+在本目录使用 PowerShell 执行。
 
-长时 1h 数据单独保留 `scripts/generate_d5_long_multiattack.py`：
+~~~powershell
+python -m pip install -e ".[learning,test]"
+python -m isac_spoofing.cli.generate_dataset --config configs/default.json --replay-source recorded_normal_episode --episodes 8 --episodes-per-shard 1 --output data/crb_model --seed 20261029
+python experiment.py --data_dir data/crb_model --out_dir runs/gru_crb --model gru --feature_set inter_uav_consistency --fixed_k 5 --k_values 5 --time_step_s 0.02
 
-```powershell
-python scripts/generate_d5_long_multiattack.py `
-  --attacked-episodes 16 `
-  --clean-episodes 4 `
-  --duration-s 3600 `
-  --rcs 6 `
-  --neighbor-feature-mode inter_uav `
-  --num-neighbors 3 `
-  --output dataNew/d5_1h_multiattack
-```
+~~~
 
-运行 `python scripts/generate_d1_multitrajectory.py --help` 或 `python scripts/generate_d5_long_multiattack.py --help` 可查看完整参数。
+未安装项目时先设置当前进程的模块路径。
 
-## 机间 ISAC 特征
+~~~powershell
+$env:PYTHONPATH="$PWD/src"
+~~~
 
-默认 `neighbor_feature_mode=inter_uav`。每个时刻的处理顺序为：
+`scripts/evaluate_navigation_mitigation.py` 保留为可选缓解评估入口，需要评估时先在专用配置中显式开启 `navigation.mitigation_enabled`。在线评价检查权重的源物理模型，旧权重或不匹配配置需要显式允许域变化，输出标为未验证。
 
-1. 根据无人机真实位置计算仿真中的真实机间距离。
-2. 使用当前配置的载频、带宽、发射功率和 RCS 计算 SNR 与测距方差。
-3. 在真实距离上加入独立测距噪声，得到完整的有向机间测量矩阵。
-4. 动态模式按测得的机间距离选择 K 个邻居，不使用真实距离选择邻居。
-5. 将机间测距与 GPS 位置推导的距离比较，输出 K 个邻居中绝对差异的最小值和最大值。
+## 实现与验证
 
-因此，默认检测特征为 10 维：6 个基站 ISAC/GPS 残差、2 个自身定位残差和 2 个机间一致性特征。NPZ 同时保存以下原始机间测量，便于审计：
+见 [模型迁移说明](docs/model_implementation.md)。
 
-- `inter_uav_range_m`
-- `inter_uav_valid_mask`
-- `inter_uav_snr_db`
-- `inter_uav_range_variance`
-
-同一次生成任务中，基站 ISAC 与机间 ISAC 使用相同的配置 RCS；跨 RCS 数据不再经过离线增强，也不再固定使用 RCS=6。
-
-## 安装与测试
-
-```powershell
-python -m pip install -e .
-python -m unittest discover -s tests -v
-```
-
-历史实验设计、结果与论文草稿保存在 `docs/`，新数据生成方式以本页和两个生成脚本的 `--help` 为准。
+当前仍以回波可分离、正确关联、准确功率报告和取 CRB 为协方差作为参考条件。没有模拟实际估计算法或完成硬件校准，本次代码修改也不产生新的论文性能结论。

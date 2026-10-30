@@ -98,6 +98,7 @@ def _expected_marker(
         "pathloss_config": asdict(config),
         "bs_positions_m": np.asarray(bs_positions_m, dtype=float).tolist(),
         "feature_names": list(FEATURE_NAMES),
+        "alarm_timing_schema_version": 1,
     }
 
 
@@ -173,6 +174,10 @@ def generate_feature_shards(
             if len(episodes) != episode_count:
                 raise RuntimeError(f"failed to read {episode_count} episodes from {source_shard}")
             arrays = {
+                "alarm_availability_offset_steps": np.asarray(
+                    [episode.alarm_availability_offset_steps for episode in episodes],
+                    dtype=np.int32,
+                ),
                 "features": np.stack(episode_features),
                 "labels": np.stack([episode.labels for episode in episodes]),
                 "time_s": np.stack([episode.time_s for episode in episodes]),
@@ -239,6 +244,10 @@ def iter_sidecar_episodes(
                 if predicate is not None and not predicate(episode_id):
                     continue
                 yield {
+                    "alarm_availability_offset_steps": (
+                        int(data["alarm_availability_offset_steps"][index])
+                        if "alarm_availability_offset_steps" in data.files else 0
+                    ),
                     "episode_id": episode_id,
                     "features": np.asarray(data["features"][index]),
                     "labels": np.asarray(data["labels"][index]),

@@ -8,6 +8,7 @@ import multiprocessing as mp
 from pathlib import Path
 import platform
 import sys
+import time
 
 import numpy as np
 
@@ -34,13 +35,44 @@ STRENGTH_UNITS: dict[str, str] = {
 
 
 _WORKER_ENVIRONMENT: ISACSpoofingEnvironment | None = None
+_WORKER_AUDIT_LEVEL = "full"
+AUDIT_LEVELS = ("standard", "full")
+OPTIONAL_COVARIANCE_AUDIT_FIELDS = (
+    "isac_measurement_covariance",
+    "isac_reported_covariance",
+    "isac_reported_los_covariance",
+)
 
 
-def _initialize_episode_worker(config_path: str | None) -> None:
+def _apply_audit_level(episode: EpisodeData, audit_level: str) -> EpisodeData:
+    """Select stored audit matrices after all measurements/features are computed."""
+    if audit_level == "full":
+        return episode
+    if audit_level != "standard":
+        raise ValueError(f"unsupported audit level: {audit_level!r}")
+    return replace(episode, **{
+        name: None for name in OPTIONAL_COVARIANCE_AUDIT_FIELDS
+    })
+
+
+def _bounded_episode_batches(tasks: list, workers: int):
+    """Bound ordered Pool.imap's pending full-episode results to 2*workers."""
+    batch_size = max(1, 2 * workers)
+    for first in range(0, len(tasks), batch_size):
+        yield tasks[first:first + batch_size]
+
+
+def _initialize_episode_worker(
+    config_path: str | None, audit_level: str = "full", replay_source: str | None = None
+) -> None:
     """Create one reusable simulator inside each worker process."""
-    global _WORKER_ENVIRONMENT
+    global _WORKER_ENVIRONMENT, _WORKER_AUDIT_LEVEL
     path = None if config_path is None else Path(config_path)
-    _WORKER_ENVIRONMENT = ISACSpoofingEnvironment(load_config(path))
+    config = load_config(path)
+    if replay_source is not None:
+        config = replace(config, attack=replace(config.attack, replay_source=replay_source))
+    _WORKER_ENVIRONMENT = ISACSpoofingEnvironment(config)
+    _WORKER_AUDIT_LEVEL = audit_level
 
 
 def _run_episode_worker(
@@ -55,7 +87,7 @@ def _run_episode_worker(
         trajectory_type=trajectory_type,
         attack_type=attack_type,
     )
-    return index, episode
+    return index, _apply_audit_level(episode, _WORKER_AUDIT_LEVEL)
 
 
 def _split(index: int, total: int, split_mode: str = "standard") -> str:
@@ -165,6 +197,20 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260716)
     parser.add_argument("--episodes-per-shard", type=int, default=100)
     parser.add_argument(
+        "--replay-source",
+        choices=("recorded_normal_episode", "delayed_clean_stream"),
+        default=None,
+        help="Override the replay source in the configuration, including in worker processes.",
+    )
+    parser.add_argument(
+        "--audit-level", choices=AUDIT_LEVELS, default="full",
+        help=(
+            "'standard' omits only the three optional full covariance matrices "
+            "after feature construction. Measurements, powers, navigation and "
+            "detector features remain unchanged. 'full' preserves all audit arrays."
+        ),
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -190,8 +236,15 @@ def main() -> None:
         parser.error("--episodes-per-shard must be positive")
     if args.workers < 1:
         parser.error("--workers must be positive")
+    if args.output.exists():
+        if not args.output.is_dir():
+            parser.error("--output must be a directory")
+        if any(args.output.iterdir()):
+            parser.error("--output must be empty; existing datasets are never overwritten")
 
     config = load_config(args.config)
+    if args.replay_source is not None:
+        config = replace(config, attack=replace(config.attack, replay_source=args.replay_source))
     feature_names = feature_names_for_neighbor_mode(
         config.features.neighbor_feature_mode
     )
@@ -252,6 +305,30 @@ def main() -> None:
         "validation": [],
         "test": [],
     }
+    replay_sources_by_split: dict[str, list[str]] = {
+        "train": [], "validation": [], "test": [],
+    }
+    seen_replay_sources: set[str] = set()
+    args.output.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    completed_count = 0
+
+    def write_progress(complete: bool = False, error: str | None = None) -> None:
+        payload = {
+            "completed_episodes": completed_count,
+            "saved_episodes": sum(sum(counts) for counts in shard_episode_counts.values()),
+            "total_episodes": args.episodes,
+            "elapsed_seconds": time.perf_counter() - started,
+            "complete": complete,
+            "status": "failed" if error else ("complete" if complete else "running"),
+            "audit_level": args.audit_level,
+            "error": error,
+        }
+        temporary = args.output / ".progress.tmp.json"
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(args.output / "progress.json")
+
+    write_progress()
 
     def flush_shard(split: str) -> None:
         buffer = episode_buffers[split]
@@ -274,16 +351,32 @@ def main() -> None:
     ]
 
     def consume_episode(index: int, episode: EpisodeData) -> None:
+        nonlocal completed_count
         seed = args.seed + index
         split = _split(index, args.episodes, split_mode=args.split_mode)
         requested_scenario, requested_trajectory = experiment_assignment[index]
         episode_id = f"episode_{index:05d}_seed_{seed}"
+        recording = dict(episode.metadata.get("replay_recording", {}))
+        expects_recording = (
+            requested_scenario == "replay"
+            and config.attack.replay_source == "recorded_normal_episode"
+        )
+        if bool(recording.get("present", False)) != expects_recording:
+            raise RuntimeError(f"replay recording presence does not match configuration: {episode_id}")
+        if expects_recording:
+            source_id = str(recording["source_id"])
+            if source_id in seen_replay_sources:
+                raise RuntimeError(f"normal replay source reused by multiple episodes: {source_id}")
+            seen_replay_sources.add(source_id)
+            replay_sources_by_split[split].append(source_id)
+            recording.update({"split": split, "victim_episode_id": episode_id})
         episode = replace(
             episode,
             metadata={
                 **episode.metadata,
                 "episode_id": episode_id,
                 "split": split,
+                "replay_recording": recording,
                 "sampling_policy": episode_sampling_policy,
                 "attack_strength_sampling_policy": (
                     "uniform_severity_then_uniform_within_interval_event_fixed"
@@ -335,52 +428,58 @@ def main() -> None:
             nominal_duration_steps.append(nominal_duration)
             actual_duration_steps.append(actual_duration)
 
-        completed = index + 1
-        if completed == args.episodes or completed % 100 == 0:
+        completed_count = index + 1
+        if completed_count == args.episodes or completed_count % 10 == 0:
+            write_progress()
             print(
-                f"generated {completed}/{args.episodes} episodes "
-                f"with {args.workers} worker(s)",
+                f"generated {completed_count}/{args.episodes} episodes "
+                f"with {args.workers} worker(s), "
+                f"elapsed {time.perf_counter() - started:.1f}s",
                 flush=True,
             )
 
-    if args.workers == 1:
-        environment = ISACSpoofingEnvironment(config)
-        for index, seed, trajectory_type, attack_type in tasks:
-            episode = environment.run_episode(
-                seed=seed,
-                trajectory_type=trajectory_type,
-                attack_type=attack_type,
-            )
-            consume_episode(index, episode)
-    else:
-        config_path = None if args.config is None else str(args.config.resolve())
-        context = mp.get_context("spawn")
-        pool = context.Pool(
-            processes=args.workers,
-            initializer=_initialize_episode_worker,
-            initargs=(config_path,),
-        )
-        try:
-            for expected_index, result in enumerate(
-                pool.imap(_run_episode_worker, tasks, chunksize=1)
-            ):
-                index, episode = result
-                if index != expected_index:
-                    raise RuntimeError(
-                        "parallel generator returned episodes out of order: "
-                        f"expected {expected_index}, got {index}"
-                    )
-                consume_episode(index, episode)
-        except BaseException:
-            pool.terminate()
-            pool.join()
-            raise
+    try:
+        if args.workers == 1:
+            environment = ISACSpoofingEnvironment(config)
+            for index, seed, trajectory_type, attack_type in tasks:
+                episode = environment.run_episode(
+                    seed=seed,
+                    trajectory_type=trajectory_type,
+                    attack_type=attack_type,
+                )
+                consume_episode(index, _apply_audit_level(episode, args.audit_level))
         else:
-            pool.close()
-            pool.join()
-
-    for split in ("train", "validation", "test"):
-        flush_shard(split)
+            config_path = None if args.config is None else str(args.config.resolve())
+            context = mp.get_context("spawn")
+            pool = context.Pool(
+                processes=args.workers,
+                initializer=_initialize_episode_worker,
+                initargs=(config_path, args.audit_level, config.attack.replay_source),
+            )
+            try:
+                for batch in _bounded_episode_batches(tasks, args.workers):
+                    for expected, result in zip(
+                        batch, pool.imap(_run_episode_worker, batch, chunksize=1)
+                    ):
+                        index, episode = result
+                        if index != expected[0]:
+                            raise RuntimeError(
+                                "parallel generator returned episodes out of order: "
+                                f"expected {expected[0]}, got {index}"
+                            )
+                        consume_episode(index, episode)
+            except BaseException:
+                pool.terminate()
+                pool.join()
+                raise
+            else:
+                pool.close()
+                pool.join()
+        for split in ("train", "validation", "test"):
+            flush_shard(split)
+    except BaseException as exc:
+        write_progress(error=f"{type(exc).__name__}: {exc}")
+        raise
     args.output.mkdir(parents=True, exist_ok=True)
     strength_summary = {
         attack_type: {
@@ -393,7 +492,28 @@ def main() -> None:
         for attack_type, values in sampled_strengths.items()
     }
     manifest = {
-        "schema_version": "1.6",
+        "schema_version": "3.0",
+        "measurement_timing": {
+            "geometry_reference": "slot_start",
+            "result_availability": "slot_end",
+            "alarm_availability_offset_steps": 1,
+        },
+        "sensing_model": "signal_supported_received_power_crb",
+        "collection_mode": "shared_gps_feedback_without_alarm_feedback",
+        "replay_source": config.attack.replay_source,
+        "replay_offset_semantics": (
+            "trajectory_phase_offset"
+            if config.attack.replay_source == "recorded_normal_episode"
+            else "measurement_delay"
+        ),
+        "replay_recording_policy": (
+            "one_private_normal_recording_per_replay_episode"
+            if config.attack.replay_source == "recorded_normal_episode" else "not_applicable"
+        ),
+        "replay_recording_count": len(seen_replay_sources),
+        "replay_recording_sources_by_split": replay_sources_by_split,
+        "confirmation_duration_s": config.navigation.confirmation_duration_s(config.simulation.dt_s),
+        "confirmation_steps": config.navigation.confirmation_steps,
         "episodes": args.episodes,
         "base_seed": args.seed,
         "feature_dim": len(feature_names),
@@ -402,6 +522,16 @@ def main() -> None:
             "format": "npz_episode_shards",
             "episode_axis": 0,
             "episodes_per_shard": args.episodes_per_shard,
+            "audit_level": args.audit_level,
+            "omitted_optional_array_fields": (
+                list(OPTIONAL_COVARIANCE_AUDIT_FIELDS)
+                if args.audit_level == "standard" else []
+            ),
+            "audit_policy": (
+                "omit only optional full covariance matrices after feature construction; "
+                "retain all required arrays, navigation, GPS, angles, powers and features"
+                if args.audit_level == "standard" else "retain all available audit arrays"
+            ),
             "total_shards": sum(
                 len(counts) for counts in shard_episode_counts.values()
             ),
@@ -467,10 +597,14 @@ def main() -> None:
             "platform": platform.platform(),
             "generation_workers": args.workers,
             "parallel_ordering": "ordered_by_episode_index",
+            "max_tasks_per_parallel_batch": (
+                min(2 * args.workers, args.episodes) if args.workers > 1 else 1
+            ),
         },
     }
     with (args.output / "manifest.json").open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
+    write_progress(complete=True)
     print(f"generated {args.episodes} episodes in {args.output.resolve()}")
     print(f"scenario distribution: {dict(attack_counts)}")
     print(f"trajectory distribution: {dict(trajectory_counts)}")

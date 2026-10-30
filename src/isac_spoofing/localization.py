@@ -4,7 +4,7 @@ import numpy as np
 
 
 class RangeDirectionLocalizer:
-    """Unweighted damped Gauss-Newton ISAC position estimator."""
+    """Fixed-covariance distance/angle WLS with a legacy no-quality path."""
 
     def __init__(
         self,
@@ -134,7 +134,17 @@ class RangeDirectionLocalizer:
         los_unit: np.ndarray,
         valid_mask: np.ndarray,
         initial_position_m: np.ndarray | None = None,
+        *,
+        measurement_covariance: np.ndarray | None = None,
+        azimuth_rad: np.ndarray | None = None,
+        elevation_rad: np.ndarray | None = None,
     ) -> np.ndarray:
+        if measurement_covariance is not None:
+            return self._estimate_angle_wls(
+                anchors_m, range_m, los_unit, valid_mask,
+                measurement_covariance, azimuth_rad, elevation_rad,
+                initial_position_m,
+            )
         anchors = np.asarray(anchors_m, dtype=np.float64)
         ranges = np.asarray(range_m, dtype=np.float64)
         directions = np.asarray(los_unit, dtype=np.float64)
@@ -229,3 +239,172 @@ class RangeDirectionLocalizer:
                 if relative_improvement < self.relative_improvement_tolerance:
                     break
         return position.astype(np.float32)
+
+    @staticmethod
+    def _range_angle_geometry(
+        position_m: np.ndarray, anchors_m: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return [distance, world azimuth, world elevation] and its Jacobian."""
+        delta = np.asarray(position_m, dtype=np.float64) - anchors_m
+        x, y, z = np.moveaxis(delta, -1, 0)
+        horizontal_squared = x * x + y * y
+        horizontal = np.sqrt(horizontal_squared)
+        squared_range = horizontal_squared + z * z
+        distance = np.sqrt(squared_range)
+        if np.any(distance <= 0.0) or np.any(horizontal <= 0.0):
+            raise ValueError("distance/angle geometry is singular at an anchor or zenith")
+        predicted = np.stack(
+            [distance, np.arctan2(y, x), np.arctan2(z, horizontal)], axis=-1,
+        )
+        jacobian = np.stack(
+            [
+                delta / distance[:, None],
+                np.stack([-y / horizontal_squared, x / horizontal_squared,
+                          np.zeros_like(x)], axis=-1),
+                np.stack([-x * z / (squared_range * horizontal),
+                          -y * z / (squared_range * horizontal),
+                          horizontal / squared_range], axis=-1),
+            ], axis=1,
+        )
+        return predicted, jacobian
+
+    @staticmethod
+    def _whitened_residual(
+        predicted: np.ndarray, observed: np.ndarray, inverse_cholesky: np.ndarray,
+    ) -> np.ndarray:
+        difference = predicted - observed
+        difference[:, 1] = np.arctan2(
+            np.sin(difference[:, 1]), np.cos(difference[:, 1]),
+        )
+        return np.einsum("mij,mj->mi", inverse_cholesky, difference)
+
+    def _estimate_angle_wls(
+        self,
+        anchors_m: np.ndarray,
+        range_m: np.ndarray,
+        los_unit: np.ndarray,
+        valid_mask: np.ndarray,
+        measurement_covariance: np.ndarray,
+        azimuth_rad: np.ndarray | None,
+        elevation_rad: np.ndarray | None,
+        initial_position_m: np.ndarray | None,
+    ) -> np.ndarray:
+        """Minimize one fixed reported covariance objective per observation batch.
+
+        No GPS, physical RCS, received-power truth or covariance recomputation
+        is needed. Each link's Cartesian reconstruction supplies initialization,
+        including when all anchors lie in the same horizontal plane.
+        """
+        anchors = np.asarray(anchors_m, dtype=np.float64)
+        ranges = np.asarray(range_m, dtype=np.float64)
+        directions = np.asarray(los_unit, dtype=np.float64)
+        mask = np.asarray(valid_mask, dtype=bool)
+        if ranges.ndim != 2:
+            raise ValueError("range_m must have shape (N, M)")
+        n, m = ranges.shape
+        if anchors.shape != (m, 3) or directions.shape != (n, m, 3):
+            raise ValueError("anchor/range/direction shapes do not agree")
+        if mask.shape != ranges.shape:
+            raise ValueError("valid_mask must have shape (N, M)")
+        covariance = np.asarray(measurement_covariance, dtype=np.float64)
+        if covariance.shape == (n, m, 4, 4):
+            covariance = covariance[..., :3, :3]
+        if covariance.shape != (n, m, 3, 3):
+            raise ValueError("reported covariance must have shape (N, M, 3, 3) or (N, M, 4, 4)")
+        outward = -directions
+        azimuth = (
+            np.arctan2(outward[..., 1], outward[..., 0])
+            if azimuth_rad is None else np.asarray(azimuth_rad, dtype=np.float64)
+        )
+        elevation = (
+            np.arctan2(outward[..., 2], np.linalg.norm(outward[..., :2], axis=-1))
+            if elevation_rad is None else np.asarray(elevation_rad, dtype=np.float64)
+        )
+        if azimuth.shape != ranges.shape or elevation.shape != ranges.shape:
+            raise ValueError("angles must have shape (N, M)")
+        observed = np.stack([ranges, azimuth, elevation], axis=-1)
+        if initial_position_m is None:
+            result = np.empty((n, 3), dtype=np.float64)
+        else:
+            result = np.asarray(initial_position_m, dtype=np.float64).copy()
+            if result.shape != (n, 3) or not np.all(np.isfinite(result)):
+                raise ValueError("initial_position_m must be finite with shape (N, 3)")
+        identity = np.eye(3, dtype=np.float64)
+        for i in range(n):
+            active = mask[i] & np.all(np.isfinite(observed[i]), axis=-1)
+            active &= ranges[i] > 0.0
+            active &= np.all(np.isfinite(covariance[i]), axis=(-1, -2))
+            selected = np.flatnonzero(active)
+            if selected.size < self.min_anchors:
+                raise ValueError("too few valid observations for the configured WLS localizer")
+            station = anchors[selected]
+            measurement = observed[i, selected]
+            fixed_covariance = covariance[i, selected].copy()
+            if not np.allclose(
+                fixed_covariance, np.swapaxes(fixed_covariance, -1, -2),
+                rtol=1.0e-8, atol=1.0e-14,
+            ):
+                raise ValueError("reported covariance must be symmetric")
+            try:
+                cholesky = np.linalg.cholesky(fixed_covariance)
+            except np.linalg.LinAlgError as exc:
+                raise ValueError("reported covariance must be positive definite") from exc
+            inverse_cholesky = np.linalg.solve(cholesky, np.broadcast_to(identity, cholesky.shape))
+            if initial_position_m is None:
+                d, theta, phi = np.moveaxis(measurement, -1, 0)
+                ct, st, cp, sp = np.cos(theta), np.sin(theta), np.cos(phi), np.sin(phi)
+                ell = np.stack([cp * ct, cp * st, sp], axis=-1)
+                cartesian_jacobian = np.stack(
+                    [
+                        ell,
+                        d[:, None] * np.stack([-cp * st, cp * ct, np.zeros_like(d)], axis=-1),
+                        d[:, None] * np.stack([-sp * ct, -sp * st, cp], axis=-1),
+                    ], axis=-1,
+                )
+                position_covariance = (
+                    cartesian_jacobian @ fixed_covariance
+                    @ np.swapaxes(cartesian_jacobian, -1, -2)
+                )
+                precision_weight = 1.0 / np.trace(position_covariance, axis1=-2, axis2=-1)
+                result[i] = np.average(station + d[:, None] * ell, axis=0, weights=precision_weight)
+            for _ in range(self.iterations):
+                predicted, jacobian = self._range_angle_geometry(result[i], station)
+                residual = self._whitened_residual(predicted, measurement, inverse_cholesky)
+                whitened_jacobian = inverse_cholesky @ jacobian
+                cost_before = float(np.sum(residual * residual))
+                hessian = (
+                    np.einsum("mji,mjk->ik", whitened_jacobian, whitened_jacobian)
+                    + self.damping * identity
+                )
+                gradient = np.einsum("mji,mj->i", whitened_jacobian, residual)
+                try:
+                    update = -np.linalg.solve(hessian, gradient)
+                except np.linalg.LinAlgError:
+                    break
+                norm = float(np.linalg.norm(update))
+                if norm > self.step_clip_m:
+                    update *= self.step_clip_m / norm
+                accepted = False
+                scale = 1.0
+                for _ in range(self.line_search_steps):
+                    trial = result[i] + scale * update
+                    try:
+                        trial_prediction, _ = self._range_angle_geometry(trial, station)
+                    except ValueError:
+                        scale *= 0.5
+                        continue
+                    trial_residual = self._whitened_residual(
+                        trial_prediction, measurement, inverse_cholesky,
+                    )
+                    cost_after = float(np.sum(trial_residual * trial_residual))
+                    if cost_after <= cost_before:
+                        result[i] = trial
+                        accepted = True
+                        break
+                    scale *= 0.5
+                if not accepted or scale * norm < self.tolerance_m:
+                    break
+                improvement = (cost_before - cost_after) / max(cost_before, np.finfo(float).tiny)
+                if improvement < self.relative_improvement_tolerance:
+                    break
+        return result.astype(np.float32)

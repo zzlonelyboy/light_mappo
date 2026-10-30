@@ -50,6 +50,13 @@ class ISACMeasurement:
     range_variance: np.ndarray
     radial_velocity_variance: np.ndarray
     direction_variance: np.ndarray
+    azimuth_rad: np.ndarray | None = None
+    elevation_rad: np.ndarray | None = None
+    measurement_covariance: np.ndarray | None = None
+    reported_covariance: np.ndarray | None = None
+    received_power_w: np.ndarray | None = None
+    reported_power_w: np.ndarray | None = None
+    reported_los_covariance: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,8 @@ class InterUAVMeasurement:
     snr_linear: np.ndarray
     snr_db: np.ndarray
     range_variance: np.ndarray
+    received_power_w: np.ndarray | None = None
+    reported_power_w: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +86,15 @@ class StepRecord:
     inter_uav: InterUAVMeasurement
     features: np.ndarray
     attack_label: np.ndarray
+    reference_position_m: np.ndarray | None = None
+    reference_velocity_mps: np.ndarray | None = None
+    command_velocity_mps: np.ndarray | None = None
+    tracking_error_m: np.ndarray | None = None
+    available_time_s: float | None = None
+    navigation_mode: np.ndarray | None = None
+    navigation_position_m: np.ndarray | None = None
+    confirmed_alarm: np.ndarray | None = None
+    detection_probability: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -110,3 +128,23 @@ class EpisodeData:
     attack_was_truncated: np.ndarray
     feature_names: tuple[str, ...]
     metadata: dict[str, Any]
+    reference_position_m: np.ndarray | None = None
+    reference_velocity_mps: np.ndarray | None = None
+    command_velocity_mps: np.ndarray | None = None
+    tracking_error_m: np.ndarray | None = None
+    available_time_s: np.ndarray | None = None
+    navigation_mode: np.ndarray | None = None
+    navigation_position_m: np.ndarray | None = None
+    confirmed_alarm: np.ndarray | None = None
+    detection_probability: np.ndarray | None = None
+    isac_azimuth_rad: np.ndarray | None = None
+    isac_elevation_rad: np.ndarray | None = None
+    isac_received_power_w: np.ndarray | None = None
+    isac_reported_power_w: np.ndarray | None = None
+    isac_measurement_covariance: np.ndarray | None = None
+    isac_reported_covariance: np.ndarray | None = None
+    isac_reported_los_covariance: np.ndarray | None = None
+    inter_uav_received_power_w: np.ndarray | None = None
+    inter_uav_reported_power_w: np.ndarray | None = None
+    # Audit-only normal recording. Zeros when metadata.replay_recording.present is false.
+    replay_source_gps_m: np.ndarray | None = None

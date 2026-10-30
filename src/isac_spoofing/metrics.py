@@ -6,6 +6,82 @@ from dataclasses import dataclass
 import numpy as np
 
 
+def alarm_availability_offset_steps(metadata: dict[str, object]) -> int:
+    """Resolve physical alarm time without reinterpreting legacy data.
+
+    Legacy episodes timestamp alarms at the observation slot. New episodes
+    explicitly store an offset of one slot in measurement_timing.
+    """
+    timing = metadata.get("measurement_timing")
+    if timing is None:
+        if str(metadata.get("schema_version", "")).startswith("3."):
+            raise ValueError("schema 3 episodes require measurement_timing metadata")
+        return 0
+    if not isinstance(timing, dict) or "alarm_availability_offset_steps" not in timing:
+        raise ValueError("measurement_timing must state alarm_availability_offset_steps")
+    value = timing["alarm_availability_offset_steps"]
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
+        raise ValueError("alarm_availability_offset_steps must be a non-negative integer")
+    return int(value)
+
+
+class ProbabilityAlarmTracker:
+    """Causal, re-armable K-step confirmation using probability inputs only."""
+
+    def __init__(
+        self,
+        num_uavs: int,
+        confirmation_steps: int,
+        threshold: float = 0.5,
+        warmup_steps: int = 0,
+    ):
+        for name, value, minimum in (
+            ("num_uavs", num_uavs, 1),
+            ("confirmation_steps", confirmation_steps, 1),
+            ("warmup_steps", warmup_steps, 0),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+        if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("threshold must lie in [0, 1]")
+        self.num_uavs = int(num_uavs)
+        self.confirmation_steps = int(confirmation_steps)
+        self.threshold = float(threshold)
+        self.warmup_steps = int(warmup_steps)
+        self.time_index = 0
+        self.active = np.zeros(self.num_uavs, dtype=bool)
+        self._positive_run = np.zeros(self.num_uavs, dtype=np.int64)
+        self._negative_run = np.zeros(self.num_uavs, dtype=np.int64)
+
+    def update(self, probabilities: np.ndarray) -> np.ndarray:
+        values = np.asarray(probabilities, dtype=np.float64)
+        if values.shape != (self.num_uavs,):
+            raise ValueError(f"probabilities must have shape ({self.num_uavs},)")
+        if np.any(~np.isfinite(values)) or np.any((values < 0.0) | (values > 1.0)):
+            raise ValueError("probabilities must be finite and lie in [0, 1]")
+        triggers = np.zeros(self.num_uavs, dtype=bool)
+        if self.time_index >= self.warmup_steps:
+            positive = values >= self.threshold
+            previously_active = self.active.copy()
+            inactive = ~previously_active
+            self._positive_run[inactive] = np.where(
+                positive[inactive], self._positive_run[inactive] + 1, 0
+            )
+            triggers = inactive & (self._positive_run >= self.confirmation_steps)
+            self.active[triggers] = True
+            self._positive_run[triggers] = 0
+            self._negative_run[triggers] = 0
+            self._negative_run[previously_active] = np.where(
+                positive[previously_active], 0, self._negative_run[previously_active] + 1
+            )
+            recovered = previously_active & (self._negative_run >= self.confirmation_steps)
+            self.active[recovered] = False
+            self._negative_run[recovered] = 0
+            self._positive_run[recovered] = 0
+        self.time_index += 1
+        return triggers
+
+
 def _binary_array(values: np.ndarray, name: str) -> np.ndarray:
     array = np.asarray(values)
     if not np.all((array == 0) | (array == 1)):
@@ -68,6 +144,7 @@ def event_detection_metrics(
     dt_s: float,
     warmup_steps: int = 0,
     detection_deadlines_s: Sequence[float] = (0.5, 1.0, 2.0, 5.0),
+    alarm_availability_offset_steps: int = 0,
 ) -> dict[str, float | int | np.ndarray]:
     """Evaluate the per-UAV first alarm with one-to-one event matching.
 
@@ -81,6 +158,12 @@ def event_detection_metrics(
         raise ValueError("predictions must have shape (T,N)")
     if dt_s <= 0.0:
         raise ValueError("dt_s must be positive")
+    if (
+        isinstance(alarm_availability_offset_steps, bool)
+        or not isinstance(alarm_availability_offset_steps, (int, np.integer))
+        or alarm_availability_offset_steps < 0
+    ):
+        raise ValueError("alarm_availability_offset_steps must be a non-negative integer")
     num_steps, num_uavs = hard.shape
     attacked = np.asarray(has_attack, dtype=bool)
     starts = np.asarray(attack_start_step, dtype=np.int64)
@@ -130,7 +213,9 @@ def event_detection_metrics(
         elif alarm < ends[uav]:
             status[uav] = "detected"
             detected += 1
-            delays.append((int(alarm) - int(starts[uav])) * float(dt_s))
+            delays.append(
+                (int(alarm) - int(starts[uav]) + alarm_availability_offset_steps) * float(dt_s)
+            )
         else:
             status[uav] = "late_false_alarm"
             false_alarms += 1
@@ -373,6 +458,7 @@ def match_alarm_events(
     dt_s: float,
     warmup_steps: int = 0,
     detection_deadlines_s: Sequence[float] = (0.5, 1.0, 2.0, 5.0),
+    alarm_availability_offset_steps: int = 0,
 ) -> dict[str, object]:
     """Match alarm triggers to non-overlapping ground-truth attack events.
 
@@ -384,6 +470,12 @@ def match_alarm_events(
 
     if num_steps < 1 or dt_s <= 0.0:
         raise ValueError("num_steps and dt_s must be positive")
+    if (
+        isinstance(alarm_availability_offset_steps, bool)
+        or not isinstance(alarm_availability_offset_steps, (int, np.integer))
+        or alarm_availability_offset_steps < 0
+    ):
+        raise ValueError("alarm_availability_offset_steps must be a non-negative integer")
     num_uavs = len(alarms_by_uav)
     if not 0 <= warmup_steps <= num_steps:
         raise ValueError("warmup_steps must lie in [0,num_steps]")
@@ -451,7 +543,10 @@ def match_alarm_events(
             if match is not None:
                 attack_index, attack = match
                 matched_attack_ids.add((uav, attack_index))
-                delay_s = (alarm.trigger_step - attack.start_step) * float(dt_s)
+                delay_s = (
+                    alarm.trigger_step - attack.start_step
+                    + alarm_availability_offset_steps
+                ) * float(dt_s)
                 detected_delays_s.append(delay_s)
                 alarm_records.append(
                     {
@@ -531,6 +626,7 @@ def match_alarm_events(
     raw_alarm_events = len(alarm_records)
     evaluated_alarm_events = true_positives + false_alarms
     return {
+        "alarm_availability_offset_steps": int(alarm_availability_offset_steps),
         "num_uavs": num_uavs,
         "num_attack_events": len(attack_events),
         # Backward-compatible alias: this is the number of raw K-step alarm

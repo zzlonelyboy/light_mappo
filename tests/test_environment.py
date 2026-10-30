@@ -14,6 +14,7 @@ from isac_spoofing.config import (
     FeatureConfig,
     GPSConfig,
     ISACConfig,
+    NavigationConfig,
     ProjectConfig,
     SimulationConfig,
     load_config,
@@ -66,6 +67,7 @@ from isac_spoofing.trajectories import (
 
 def small_config() -> ProjectConfig:
     return ProjectConfig(
+        navigation=NavigationConfig(enabled=False),
         simulation=SimulationConfig(
             num_uavs=4,
             dt_s=0.1,
@@ -76,6 +78,7 @@ def small_config() -> ProjectConfig:
         ),
         gps=GPSConfig(noise_std_m=(0.4, 0.4, 0.6)),
         attack=AttackConfig(
+            replay_source="delayed_clean_stream",
             clean_episode_probability=0.0,
             attack_types=("stealth",),
             duration_fraction_range=(0.4, 0.4),
@@ -521,7 +524,7 @@ class EnvironmentTests(unittest.TestCase):
             measurement,
         )
 
-        self.assertEqual(metadata["schema_version"], "2.1")
+        self.assertEqual(metadata["schema_version"], "3.0")
         self.assertEqual(
             metadata["feature_groups"],
             {"isac_gps_residual": 6, "self": 2, "neighbors": 3},
@@ -589,7 +592,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertFalse(scenario.was_truncated)
 
     def test_attack_strength_is_sampled_once_per_event(self) -> None:
-        config = AttackConfig(clean_episode_probability=0.0)
+        config = AttackConfig(clean_episode_probability=0.0, replay_source="delayed_clean_stream")
         injector = GPSAttackInjector(config, dt_s=0.1)
         definitions = {
             "random": (config.random_sigma_ranges_m, "sigma_m", "m"),
@@ -755,7 +758,7 @@ class EnvironmentTests(unittest.TestCase):
     def test_attacks_preserve_nominal_gps_noise_semantics(self) -> None:
         nominal = np.arange(24, dtype=np.float32).reshape(4, 2, 3)
         target_mask = np.asarray([True, False])
-        injector = GPSAttackInjector(AttackConfig(), dt_s=0.1)
+        injector = GPSAttackInjector(AttackConfig(replay_source="delayed_clean_stream"), dt_s=0.1)
 
         replay = AttackScenario(
             attack_type="replay",
@@ -887,7 +890,7 @@ class EnvironmentTests(unittest.TestCase):
         project_root = Path(__file__).resolve().parents[1]
         config = load_config(project_root / "configs" / "default.json")
         self.assertEqual(config.simulation.num_uavs, 8)
-        self.assertEqual(config.simulation.dt_s, 0.1)
+        self.assertEqual(config.simulation.dt_s, 0.02)
         self.assertEqual(config.simulation.duration_s, 60.0)
         self.assertEqual(config.simulation.speed_mps, 4.0)
         self.assertEqual(config.simulation.trajectory_types, ("s_curve",))
@@ -899,7 +902,7 @@ class EnvironmentTests(unittest.TestCase):
             config.simulation.s_curve_target_m, (100.0, 100.0, 50.0)
         )
         self.assertEqual(config.simulation.s_curve_lateral_amplitude_m, 44.0)
-        self.assertEqual(config.gps.noise_std_m, (0.0, 0.0, 0.0))
+        self.assertEqual(config.gps.noise_std_m, (1.5, 1.5, 3.0))
         self.assertEqual(config.attack.clean_episode_probability, 0.25)
         self.assertEqual(config.attack.duration_fraction_range, (0.2, 0.4))
         self.assertEqual(config.attack.target_count_range, (1, 4))
@@ -919,9 +922,9 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(config.to_dict(), ProjectConfig().to_dict())
         self.assertEqual(len(config.isac.anchors_m), 4)
         self.assertEqual(config.isac.carrier_hz, 3.0e9)
-        self.assertEqual(config.isac.bandwidth_hz, 30.0e6)
+        self.assertEqual(config.isac.bandwidth_hz, 40.0e6)
         self.assertEqual(config.isac.tx_power_dbm, 27.0)
-        self.assertEqual(config.isac.radar_cross_section, 6.0)
+        self.assertEqual(config.isac.radar_cross_section, 0.05)
         self.assertEqual(ISACMeasurementModel.LIGHT_SPEED_MPS, 3.0e8)
         self.assertEqual(config.features.position_scale_m, 1.0)
         self.assertEqual(config.features.warmup_steps, 0)
@@ -1178,9 +1181,9 @@ class ModelShapeTests(unittest.TestCase):
             TimeStepMLP,
         )
 
-        self.assertEqual(TimeStepMLP()(torch.zeros(3, 11)).shape, (3, 1))
+        self.assertEqual(TimeStepMLP()(torch.zeros(3, 10)).shape, (3, 1))
         self.assertEqual(
-            CausalGRUDetector()(torch.zeros(3, 5, 11)).shape,
+            CausalGRUDetector()(torch.zeros(3, 5, 10)).shape,
             (3, 5, 1),
         )
 

@@ -25,3 +25,4 @@ events.out.tfevents.*
 .env
 .env.*
 !.env.example
+/.idea/

@@ -137,5 +137,7 @@
     "line_search_steps": 8,
     "relative_improvement_tolerance": 0.001,
     "min_anchors": 4
-  }
+  },
+  "model_schema": "legacy_effective_echo",
+  "migration_note": "Historical effective-echo configuration. Rejected by the current CRB loader. Use default.json or multitrajectory_crb.json and explicitly choose physical parameters."
 }

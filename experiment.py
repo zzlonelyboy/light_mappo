@@ -19,9 +19,9 @@ from isac_spoofing.training import LOSS_OBJECTIVES, TrainingConfig, train_detect
 
 def _parse_k_values(raw: str) -> tuple[int, ...]:
     values = tuple(dict.fromkeys(int(value.strip()) for value in raw.split(",")))
-    if not values or any(value < 1 or value > 5 for value in values):
+    if not values or any(value < 1 for value in values):
         raise argparse.ArgumentTypeError(
-            "K values must be comma-separated integers in [1, 5]"
+            "K values must be comma-separated positive integers"
         )
     return values
 
@@ -59,11 +59,11 @@ def main() -> None:
     )
     parser.add_argument("--out_dir", type=Path, required=True)
     parser.add_argument("--data_dir", type=Path, default=Path("data/raw"))
-    parser.add_argument("--model", choices=("mlp", "gru"), default="mlp")
+    parser.add_argument("--model", choices=("mlp", "gru"), default="gru")
     parser.add_argument(
         "--feature_set",
         choices=tuple(FEATURE_SETS),
-        default="full_f11",
+        default="inter_uav_consistency",
     )
     parser.add_argument(
         "--class_weighting",
@@ -82,7 +82,7 @@ def main() -> None:
         ),
     )
     parser.add_argument("--confirmation_temperature", type=float, default=0.1)
-    parser.add_argument("--time_step_s", type=float, default=0.1)
+    parser.add_argument("--time_step_s", type=float, default=0.02)
     parser.add_argument("--detection_loss_weight", type=float, default=0.1)
     parser.add_argument("--delay_loss_weight", type=float, default=0.01)
     parser.add_argument("--false_alarm_loss_weight", type=float, default=0.05)
@@ -121,11 +121,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260716)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--num_threads", type=int, default=1)
-    parser.add_argument("--k_values", type=_parse_k_values, default=(1, 2, 3, 4, 5))
+    parser.add_argument("--k_values", type=_parse_k_values, default=(5,))
     parser.add_argument(
         "--fixed_k",
         type=int,
-        choices=(1, 2, 3, 4, 5),
+        default=5,
         help=(
             "Use a pre-specified K instead of selecting K by validation event F1. "
             "The validation K sweep is still saved for diagnostics."
@@ -138,6 +138,8 @@ def main() -> None:
         help="Run a train/validation pilot without opening the frozen test split",
     )
     args = parser.parse_args()
+    if args.fixed_k is not None and args.fixed_k < 1:
+        parser.error("--fixed_k must be positive")
     if args.bootstrap_samples < 0:
         parser.error("--bootstrap_samples must be non-negative")
     if args.input_encoder_dim < 0:

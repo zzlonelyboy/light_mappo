@@ -238,7 +238,127 @@ def load_episode_shard(path: str | Path) -> tuple[LoadedEpisode, ...]:
     return tuple(episodes)
 
 
+def _memmap_episode_metadata(directory: Path) -> list[dict[str, object]]:
+    path = directory / "metadata.json"
+    with path.open("r", encoding="utf-8") as handle:
+        contents = json.load(handle)
+    rows = contents.get("episodes") if isinstance(contents, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"{path}: episodes must be a nonempty list")
+    if any(not isinstance(row, dict) for row in rows):
+        raise ValueError(f"{path}: episode metadata must be objects")
+    return rows
+
+
+def _validate_memmap_episode_ids(data_root: Path) -> None:
+    """Check split membership using metadata without opening held-out arrays."""
+    seen: dict[str, str] = {}
+    for split in ("train", "validation", "test"):
+        directory = data_root / split
+        if not (directory / "metadata.json").is_file():
+            continue
+        for row in _memmap_episode_metadata(directory):
+            episode_id = row.get("episode_id")
+            if not isinstance(episode_id, str) or not episode_id:
+                raise ValueError(f"{directory}: every episode needs a nonempty episode_id")
+            if row.get("split") != split:
+                raise ValueError(f"{episode_id}: metadata split does not match {split}")
+            if episode_id in seen:
+                raise ValueError(
+                    f"duplicate episode_id {episode_id!r} in {seen[episode_id]} and {split}; "
+                    "complete episodes must not cross splits"
+                )
+            seen[episode_id] = split
+
+
+def load_memmap_split(data_root: str | Path, split: str) -> tuple[LoadedEpisode, ...]:
+    """Load feature-only NPY storage through read-only, per-episode mmap views.
+
+    Labels and features stay memory mapped. Small event arrays and metadata
+    are read normally; validation creates at most one episode-sized temporary.
+    """
+    root = Path(data_root)
+    directory = root / str(split)
+    with (root / "manifest.json").open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    if manifest.get("storage", {}).get("format") != "npy_feature_memmap_v1":
+        raise ValueError("load_memmap_split requires npy_feature_memmap_v1 storage")
+    raw_names = manifest.get("feature_names")
+    if not isinstance(raw_names, list) or not raw_names:
+        raise ValueError("memmap manifest requires nonempty feature_names")
+    feature_names = tuple(str(value) for value in raw_names)
+    if len(set(feature_names)) != len(feature_names):
+        raise ValueError("feature_names must be unique")
+    _validate_memmap_episode_ids(root)
+    metadata = _memmap_episode_metadata(directory)
+    feature_path = directory / "features.npy"
+    features = np.load(feature_path, mmap_mode="r", allow_pickle=False)
+    labels = np.load(directory / "labels.npy", mmap_mode="r", allow_pickle=False)
+    if features.dtype != np.dtype(np.float32):
+        raise ValueError(f"{feature_path}: memmap features must have dtype float32")
+    if labels.dtype != np.dtype(np.uint8):
+        raise ValueError(f"{directory}: memmap labels must have dtype uint8")
+    if features.ndim != 4 or any(value < 1 for value in features.shape):
+        raise ValueError(f"{feature_path}: features must have nonempty shape (E,T,N,F)")
+    episode_count, time_steps, num_uavs, feature_dim = features.shape
+    if labels.shape != features.shape[:3]:
+        raise ValueError(f"{directory}: labels must have shape (E,T,N)")
+    if len(metadata) != episode_count:
+        raise ValueError(f"{directory}: metadata count differs from feature episode count")
+    if len(feature_names) != feature_dim:
+        raise ValueError(f"{directory}: feature name count differs from feature dimension")
+    event_names = (
+        "has_attack", "attack_start_step", "attack_end_step_exclusive",
+        "attack_was_truncated",
+    )
+    events: dict[str, np.ndarray] = {}
+    with np.load(directory / "events.npz", allow_pickle=False) as stored:
+        missing = set(event_names) - set(stored.files)
+        if missing:
+            raise ValueError(f"{directory}: missing event arrays {sorted(missing)}")
+        for name in event_names:
+            values = stored[name]
+            if values.shape != (episode_count, num_uavs):
+                raise ValueError(f"{directory}: {name} must have shape (E,N)")
+            if name in ("has_attack", "attack_was_truncated"):
+                _validate_binary(values, name)
+                events[name] = np.asarray(values, dtype=bool)
+            else:
+                if values.dtype.kind not in "iu":
+                    raise ValueError(f"{directory}: {name} must use an integer dtype")
+                events[name] = np.asarray(values, dtype=np.int32)
+    attacked = events["has_attack"]
+    starts = events["attack_start_step"]
+    ends = events["attack_end_step_exclusive"]
+    if np.any(starts[attacked] < 0) or np.any(ends[attacked] > time_steps) or np.any(
+        ends[attacked] <= starts[attacked]
+    ):
+        raise ValueError(f"{directory}: attack event bounds are outside the episode")
+    if np.any(starts[~attacked] != -1) or np.any(ends[~attacked] != -1):
+        raise ValueError(f"{directory}: unattacked UAV event bounds must be -1")
+    episodes = []
+    for index, row in enumerate(metadata):
+        if not np.all(np.isfinite(features[index])):
+            raise FloatingPointError(f"{feature_path}: features contain non-finite values")
+        _validate_binary(labels[index], "labels")
+        episodes.append(LoadedEpisode(
+            episode_id=str(row["episode_id"]), path=feature_path,
+            features=features[index], labels=labels[index],
+            has_attack=attacked[index], attack_start_step=starts[index],
+            attack_end_step_exclusive=ends[index],
+            attack_was_truncated=events["attack_was_truncated"][index],
+            feature_names=feature_names, metadata=row,
+        ))
+    return tuple(episodes)
+
+
 def load_split(data_root: str | Path, split: str) -> tuple[LoadedEpisode, ...]:
+    manifest_path = Path(data_root) / "manifest.json"
+    if manifest_path.is_file():
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        if manifest.get("storage", {}).get("format") == "npy_feature_memmap_v1":
+            return load_memmap_split(data_root, split)
     loaded: list[LoadedEpisode] = []
     for path in discover_episode_files(data_root, split):
         if path.name.startswith("shard_"):

@@ -7,7 +7,7 @@ from typing import Iterator, Mapping, Sequence
 
 import numpy as np
 
-from .data import ARRAY_FIELDS
+from .data import ARRAY_FIELDS, OPTIONAL_ARRAY_FIELDS
 
 
 @dataclass(frozen=True)
@@ -65,7 +65,7 @@ def _requested_array_names(array_names: Sequence[str] | None) -> tuple[str, ...]
         raise ValueError("at least one raw array must be requested")
     if len(set(requested)) != len(requested):
         raise ValueError("requested raw array names must be unique")
-    unknown = sorted(set(requested) - set(ARRAY_FIELDS))
+    unknown = sorted(set(requested) - set(ARRAY_FIELDS) - set(OPTIONAL_ARRAY_FIELDS))
     if unknown:
         raise ValueError(f"unknown raw episode arrays: {unknown}")
     if "labels" not in requested:
@@ -106,7 +106,7 @@ def _validate_episode_arrays(
         }:
             if value.shape != (num_uavs,):
                 raise ValueError(f"{path}: {name} must have shape ({num_uavs},)")
-        elif name == "time_s":
+        elif name in {"time_s", "available_time_s"}:
             if value.shape != (num_steps,):
                 raise ValueError(f"{path}: time_s must have shape ({num_steps},)")
         elif value.ndim >= 2 and value.shape[0] != num_steps:
