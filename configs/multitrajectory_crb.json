@@ -17,12 +17,12 @@
     "s_curve_start_m": [
       0.0,
       0.0,
-      10.0
+      20.0
     ],
     "s_curve_target_m": [
       100.0,
       100.0,
-      50.0
+      60.0
     ],
     "s_curve_lateral_amplitude_m": 44.0
   },

@@ -17,8 +17,8 @@ class SimulationConfig:
     formation_type: str = "cubic"
     cube_edge_length_m: float = 8.0
     formation_jitter_std_m: float = 0.5
-    s_curve_start_m: tuple[float, float, float] = (0.0, 0.0, 10.0)
-    s_curve_target_m: tuple[float, float, float] = (100.0, 100.0, 50.0)
+    s_curve_start_m: tuple[float, float, float] = (0.0, 0.0, 20.0)
+    s_curve_target_m: tuple[float, float, float] = (100.0, 100.0, 60.0)
     s_curve_lateral_amplitude_m: float = 44.0
 
     @property

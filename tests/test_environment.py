@@ -897,9 +897,9 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(config.simulation.formation_type, "cubic")
         self.assertEqual(config.simulation.cube_edge_length_m, 8.0)
         self.assertEqual(config.simulation.formation_jitter_std_m, 0.5)
-        self.assertEqual(config.simulation.s_curve_start_m, (0.0, 0.0, 10.0))
+        self.assertEqual(config.simulation.s_curve_start_m, (0.0, 0.0, 20.0))
         self.assertEqual(
-            config.simulation.s_curve_target_m, (100.0, 100.0, 50.0)
+            config.simulation.s_curve_target_m, (100.0, 100.0, 60.0)
         )
         self.assertEqual(config.simulation.s_curve_lateral_amplitude_m, 44.0)
         self.assertEqual(config.gps.noise_std_m, (1.5, 1.5, 3.0))
